@@ -2,6 +2,7 @@ import os
 import pathlib
 import sys
 
+import openai
 from dotenv import load_dotenv
 from openai import OpenAI
 
@@ -39,14 +40,35 @@ def respond(ticket, analysis):
     )
 
 
+def report(call, error):
+    """Print the failure legibly. No retry, no recovery — the run still dies."""
+    if os.environ.get("TRACEBACK"):
+        raise error
+
+    status = getattr(error, "status_code", None)
+    body = getattr(error, "body", None)
+    detail = str(error)
+    if isinstance(body, dict):
+        detail = body.get("message") or detail
+
+    print(f"--- FAILED on {call} ---")
+    print(f"{type(error).__name__}{f' (HTTP {status})' if status else ''}: {detail}")
+    raise SystemExit(1)
+
+
 def main():
     ticket_id = sys.argv[1]
     ticket = pathlib.Path("tickets", f"{ticket_id}.md").read_text()
 
-    analysis = understand(ticket)
-    print(f"--- ANALYSIS ({ticket_id}) ---\n{analysis}\n")
+    call = "analysis"
+    try:
+        analysis = understand(ticket)
+        print(f"--- ANALYSIS ({ticket_id}) ---\n{analysis}\n")
 
-    print(f"--- RESPONSE ({ticket_id}) ---\n{respond(ticket, analysis)}")
+        call = "response"
+        print(f"--- RESPONSE ({ticket_id}) ---\n{respond(ticket, analysis)}")
+    except openai.APIError as error:
+        report(call, error)
 
 
 main()

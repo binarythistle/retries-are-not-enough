@@ -1,7 +1,14 @@
 """A fake OpenAI chat-completions endpoint that replays recorded responses.
 
     uv run mock_llm.py
-    uv run mock_llm.py > mock.log      # or capture it
+    uv run mock_llm.py > mock.log            # or capture it
+
+Force errors on either of the app's two calls. A comma-separated sequence is
+consumed one entry per attempt, then cycles, so every run behaves the same:
+
+    RESPONSE_STATUS=500 uv run mock_llm.py          # call 2 always fails
+    RESPONSE_STATUS=500,500,200 uv run mock_llm.py  # fails twice, then succeeds
+    ANALYSIS_STATUS=429,200 uv run mock_llm.py      # call 1 recovers on retry 1
 
 The app reaches it via OPENAI_BASE_URL in .env, so `uv run main.py 1041`
 needs no extra flags.
@@ -11,6 +18,7 @@ import json
 import os
 import pathlib
 import re
+import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -18,10 +26,27 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Line-buffer stdout so `> mock.log` shows the banner immediately, not once
+# the first request happens to flush the buffer.
+sys.stdout.reconfigure(line_buffering=True)
+
 RECORDINGS = os.environ.get("RECORDINGS", "recordings/gpt-4o-mini")
 MODEL = os.environ.get("MODEL", "gpt-4o-mini")
 PORT = int(os.environ.get("PORT", "8000"))
 DELAY_SECONDS = float(os.environ.get("DELAY_SECONDS", "2"))
+
+# HTTP status per call, as a comma-separated sequence consumed one entry per
+# attempt and then cycled: "500,500,200" fails twice and succeeds on the third.
+# 200 replays the recording.
+def statuses(name):
+    return [int(s) for s in os.environ.get(name, "200").split(",")]
+
+
+STATUS = {
+    "analysis": statuses("ANALYSIS_STATUS"),
+    "response": statuses("RESPONSE_STATUS"),
+}
+attempts = {"analysis": 0, "response": 0}
 
 BLOCK = re.compile(r"^--- (ANALYSIS|RESPONSE) \((\d+)\) ---$", re.MULTILINE)
 
@@ -72,12 +97,23 @@ class Handler(BaseHTTPRequestHandler):
         messages = {m["role"]: m["content"] for m in body["messages"]}
         ticket_id, kind = choose(messages.get("system", ""), messages.get("user", ""))
 
+        sequence = STATUS[kind]
+        attempt = attempts[kind]
+        attempts[kind] = attempt + 1
+        status = sequence[attempt % len(sequence)]
+
         count += 1
         print(
-            f"[{count}] {kind:<8} ticket={ticket_id} (waiting {DELAY_SECONDS}s)",
-            flush=True,
+            f"[{count}] {kind:<8} ticket={ticket_id} attempt={attempt + 1} "
+            f"-> {status} (waiting {DELAY_SECONDS}s)"
         )
         time.sleep(DELAY_SECONDS)
+
+        if status != 200:
+            return self.send_json(
+                status,
+                {"error": {"message": f"mock server returned {status} for {kind}"}},
+            )
 
         if (ticket_id, kind) not in RECORDED:
             return self.send_json(
@@ -121,4 +157,6 @@ class Handler(BaseHTTPRequestHandler):
 print(f"Serving {len(RECORDED)} recordings from {RECORDINGS} on port {PORT}")
 print(f"  tickets: {', '.join(sorted({t for t, _ in RECORDED}))}")
 print(f"  delay:   {DELAY_SECONDS}s per response")
+for kind, sequence in STATUS.items():
+    print(f"  {kind:<8} -> {','.join(str(s) for s in sequence)}")
 ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
