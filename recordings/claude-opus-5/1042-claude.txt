@@ -1,0 +1,20 @@
+--- ANALYSIS (1042) ---
+- **Core problem:** On mobile checkout, a slow/hanging payment step lets customers tap "Pay" a second time, producing two distinct order IDs with identical baskets seconds apart and two real charges. Three confirmed cases this morning, refunded manually; issue is live in production and involves customer money.
+
+- **Likely cause:** No idempotency protection on the payment/order-creation path — the submit button isn't disabled or locked after the first tap, and there's no idempotency key or duplicate-order check (same customer + basket + short time window) server-side. The slow response is the trigger, not the root cause; the real defect is that a retry is treated as a brand-new order. Worth checking whether mobile network latency or a recent change to payment gateway timeouts increased the hang window.
+
+- **Urgency:** Highest — P1, act now. Every slow mobile checkout is a potential double charge, so exposure grows with traffic and there is direct financial and trust impact. Immediate mitigation: disable/spinner-lock the Pay button client-side and add a server-side duplicate-order guard; concurrently audit today's orders for unreported duplicates and proactively refund rather than waiting for complaints.
+
+--- RESPONSE (1042) ---
+Thanks for flagging this so quickly — you're right that this is a money problem, so we're treating it as P1 and working it now.
+
+What's happening: the payment step isn't protected against a second tap. When the response hangs, a retry gets treated as a brand-new order rather than the same one, so you end up with two order IDs and two real charges. The slow mobile connection is the trigger, but the actual defect is the missing duplicate protection.
+
+Immediate steps on our side:
+- Locking the Pay button after the first tap so a second press can't submit
+- Adding a server-side guard that rejects a duplicate order from the same customer with the same basket inside a short time window
+- Checking whether a recent change to payment gateway timeouts widened the hang window
+
+One thing that would help right away: we're auditing today's orders for identical baskets seconds apart so we can refund proactively rather than waiting for customers to notice. If you have the three order ID pairs you've already refunded, send them over and we'll exclude them and confirm the pattern matches what we're finding.
+
+I'll update you as soon as the button lock and duplicate guard are live, and again once the audit is complete.

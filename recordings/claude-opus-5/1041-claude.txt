@@ -1,0 +1,19 @@
+--- ANALYSIS (1041) ---
+- **Core problem:** Password reset emails are never delivered. The UI returns the standard "Check your inbox" confirmation (which fires regardless of actual send status), but nothing arrives after 20+ minutes, spam checked. The customer is fully locked out of the admin console.
+
+- **Likely cause:** A regression or delivery failure introduced over the weekend — a known-good reset was completed Friday. Prime suspects, in order: (1) outbound mail service failure — expired ESP/SMTP credentials, exhausted quota, or a bad config in a weekend deploy; (2) the customer's address landing on a bounce/complaint suppression list; (3) recipient-side filtering or domain reputation/blocklisting. Check mail provider logs for this address first — that single lookup distinguishes "never queued" from "sent but not delivered," which splits the investigation cleanly.
+
+- **Urgency:** Higher than the assigned P2 warrants. There is no self-service workaround (reset is the recovery path, and it is the broken component), the user holds an admin role, and month-end invoice approval is blocked — a hard business deadline. Recommend: unblock this user immediately via manual/out-of-band credential reset, then confirm scope. If mail delivery is broken globally rather than for this one address, every locked-out user is silently affected and this becomes a P1 incident.
+
+--- RESPONSE (1041) ---
+Hi Ellen — thanks for the clear details, especially the note that your colleague's reset worked Friday. That's a useful marker for us.
+
+Two things happening now:
+
+1. **Getting you back in.** I'm arranging an out-of-band reset so you're not waiting on the email path that's currently failing. I'll follow up shortly on a separate channel to verify your identity and hand over temporary access — you should be able to approve this month's invoices today.
+
+2. **Finding the cause.** I'm pulling our mail provider logs for your address to see whether the message was ever queued or was sent and blocked downstream. That distinction points us straight at the fix. The green "Check your inbox" banner appears whether or not the send actually succeeded, so it unfortunately didn't tell you anything was wrong.
+
+I'm also raising the priority on this. If our outbound mail is broken more broadly, other locked-out users are hitting the same wall with no way to tell us — so this needs a wider look than one ticket.
+
+You don't need to do anything further right now. I'll come back to you within the hour with access details and what we found.

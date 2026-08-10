@@ -1,0 +1,16 @@
+--- ANALYSIS (1043) ---
+- **Core problem:** The Reports > Monthly CSV export omits the record owner field, so the customer manually reconstructs it via spreadsheet lookup — roughly one hour of rework every month.
+- **Likely cause:** Not a defect. The monthly export template's column set simply doesn't include "owner"; this is a feature/enhancement request to add it (worth confirming whether owner is available in other exports or via a custom report, which could serve as an interim workaround).
+- **Urgency:** Low. Filed at Priority 4 and explicitly flagged "not urgent" by the requester; impact is a predictable, recurring hour of manual effort with a working (if tedious) workaround, so no deadline pressure — but the recurring cost makes it a good candidate for a backlog item rather than a close-out.
+
+--- RESPONSE (1043) ---
+Hi Sarah — thanks for flagging this, and for the detail on what it costs you.
+
+You're right that the Monthly export template just doesn't include the owner column; it's not something that's broken on your end. I'm logging this as an enhancement request so it's tracked properly rather than closed out — an hour a month is worth fixing.
+
+In the meantime, I want to check whether owner is available through a custom report or one of the other export options, which could get you the same data without the manual lookup. I'll take a look and come back to you either way, likely in the next day or two.
+
+If it turns out there's no interim option, I'll let you know that too so you're not waiting on it.
+
+Best,
+Support
