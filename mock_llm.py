@@ -48,6 +48,22 @@ STATUS = {
 }
 attempts = {"analysis": 0, "response": 0}
 
+# Once this status is served, every later request returns it too, whatever the
+# sequences say. Models an account-level failure like exhausted quota, which no
+# amount of retrying or restarting can clear.
+STICKY_STATUS = os.environ.get("STICKY_STATUS")
+STICKY_STATUS = int(STICKY_STATUS) if STICKY_STATUS else None
+latched = False
+
+
+def error_code(status, is_latched):
+    """The `code` OpenAI would send, so the app can tell transient from terminal."""
+    if status == 429:
+        return "insufficient_quota" if is_latched else "rate_limit_exceeded"
+    if status == 400:
+        return "invalid_request_error"
+    return None
+
 BLOCK = re.compile(r"^--- (ANALYSIS|RESPONSE) \((\d+)\) ---$", re.MULTILINE)
 
 
@@ -97,23 +113,38 @@ class Handler(BaseHTTPRequestHandler):
         messages = {m["role"]: m["content"] for m in body["messages"]}
         ticket_id, kind = choose(messages.get("system", ""), messages.get("user", ""))
 
+        global latched
+
         sequence = STATUS[kind]
         attempt = attempts[kind]
         attempts[kind] = attempt + 1
-        status = sequence[attempt % len(sequence)]
+
+        if latched:
+            status = STICKY_STATUS
+        else:
+            status = sequence[attempt % len(sequence)]
+            if status == STICKY_STATUS:
+                latched = True
+
+        # The SDK reports how many times *it* has retried this call. That count
+        # lives in the client process, so it restarts from 0 when the app does.
+        retries = self.headers.get("x-stainless-retry-count", "?")
 
         count += 1
         print(
-            f"[{count}] {kind:<8} ticket={ticket_id} attempt={attempt + 1} "
-            f"-> {status} (waiting {DELAY_SECONDS}s)"
+            f"[{count}] {kind:<8} ticket={ticket_id} "
+            f"retry={retries} seen={attempt + 1} "
+            f"-> {status}{' (latched)' if latched else ''} "
+            f"(waiting {DELAY_SECONDS}s)"
         )
         time.sleep(DELAY_SECONDS)
 
         if status != 200:
-            return self.send_json(
-                status,
-                {"error": {"message": f"mock server returned {status} for {kind}"}},
-            )
+            error = {"message": f"mock server returned {status} for {kind}"}
+            code = error_code(status, latched)
+            if code:
+                error["type"] = error["code"] = code
+            return self.send_json(status, {"error": error})
 
         if (ticket_id, kind) not in RECORDED:
             return self.send_json(
@@ -159,4 +190,8 @@ print(f"  tickets: {', '.join(sorted({t for t, _ in RECORDED}))}")
 print(f"  delay:   {DELAY_SECONDS}s per response")
 for kind, sequence in STATUS.items():
     print(f"  {kind:<8} -> {','.join(str(s) for s in sequence)}")
+if STICKY_STATUS:
+    print(f"  sticky   -> once {STICKY_STATUS} is served, everything returns it")
+print("  log key: retry = the app's own counter, back to 0 whenever it restarts")
+print("           seen  = calls of that kind this server has served, ever")
 ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
