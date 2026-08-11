@@ -15,11 +15,26 @@ MODELS = {
 
 # The only state this app has, and it lives in this process's memory. Every run
 # starts from exactly these values, however the last run ended.
-state = {"provider": "openai", "analysis": None}
+state = {"provider": "openai", "analysis": None, "response": None}
 
 MAX_RETRIES = int(os.environ.get("MAX_RETRIES", "2"))
 
 client = OpenAI(max_retries=MAX_RETRIES)
+
+# Colour is display only. Off when stdout is not a terminal, so `> run.log`
+# stays free of escape codes, and off when NO_COLOR is set. When it is off the
+# codes are empty strings, so every paint() below is a no-op.
+COLOUR = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+
+GREEN = "\033[32m" if COLOUR else ""
+RED = "\033[31m" if COLOUR else ""
+DIM = "\033[2m" if COLOUR else ""
+RESET = "\033[0m" if COLOUR else ""
+
+
+def paint(colour, text):
+    """Green = the model spoke. Red = it failed. Dim = the app talking about itself."""
+    return f"{colour}{text}{RESET}"
 
 
 def model():
@@ -27,11 +42,27 @@ def model():
     return MODELS[state["provider"]]
 
 
+# Column widths, so the "at start" and "at exit" lines align under each other
+# and the audience can compare them vertically.
+PROVIDER_WIDTH = max(len(name) for name in MODELS)
+STATUS_WIDTH = len("* COMPLETED")
+
+
+def status(value, width=0):
+    """A step's work either survived into this state dict or it did not."""
+    text, colour = ("✔ COMPLETED", GREEN) if value else ("✘ MISSING", RED)
+    return paint(colour, f"{text:<{width}}" if width else text)
+
+
 def show_state(when):
-    analysis = state["analysis"]
-    stored = f"{len(analysis)} chars" if analysis else "none"
-    print(f"--- IN-PROCESS STATE ({when}) ---")
-    print(f"provider={state['provider']}  analysis={stored}\n")
+    print(paint(DIM, f"--- IN-PROCESS STATE ({when}) ---"))
+    print(
+        paint(DIM, f"provider={state['provider']:<{PROVIDER_WIDTH}}  analysis=")
+        + status(state["analysis"], STATUS_WIDTH)
+        + paint(DIM, "  response=")
+        + status(state["response"])
+        + "\n"
+    )
 
 
 def ask(system, user):
@@ -77,17 +108,22 @@ def report(call, error):
     if code:
         label.append(code)
 
-    print(f"--- FAILED on {call} via {model()} ---")
-    print(f"{' / '.join(label)}: {detail or error}\n")
+    print(paint(RED, f"--- FAILED on {call} via {model()} ---"))
+    print(paint(RED, f"{' / '.join(label)}: {detail or error}") + "\n")
 
     # Terminal conditions can't be retried away, so the only move left is a
     # different provider. Record the decision in state — where it will sit until
     # this process exits, a few lines from now.
     if code == "insufficient_quota":
         state["provider"] = "anthropic"
-        print("--- DECISION ---")
-        print(f"Tokens maxed out on {MODELS['openai']}. Retrying will not help.")
-        print("Fall back to Anthropic models.\n")
+        print(paint(DIM, "--- DECISION ---"))
+        print(
+            paint(
+                DIM,
+                f"Tokens maxed out on {MODELS['openai']}. Retrying will not help.",
+            )
+        )
+        print(paint(DIM, "Fall back to Anthropic models.") + "\n")
 
     show_state("at exit")
     raise SystemExit(1)
@@ -98,19 +134,25 @@ def main():
     ticket = pathlib.Path("tickets", f"{ticket_id}.md").read_text()
 
     print(
-        f"ticket {ticket_id}  |  {client.base_url}  |  "
-        f"max_retries={MAX_RETRIES}\n"
+        paint(
+            DIM,
+            f"ticket {ticket_id}  |  {client.base_url}  |  "
+            f"max_retries={MAX_RETRIES}",
+        )
+        + "\n"
     )
     show_state("at start")
 
     call = "analysis"
     try:
         state["analysis"] = understand(ticket)
-        print(f"--- ANALYSIS ({ticket_id}) via {model()} ---\n{state['analysis']}\n")
+        print(paint(GREEN, f"--- ANALYSIS ({ticket_id}) via {model()} ---"))
+        print(f"{state['analysis']}\n")
 
         call = "response"
-        reply = respond(ticket, state["analysis"])
-        print(f"--- RESPONSE ({ticket_id}) via {model()} ---\n{reply}\n")
+        state["response"] = respond(ticket, state["analysis"])
+        print(paint(GREEN, f"--- RESPONSE ({ticket_id}) via {model()} ---"))
+        print(f"{state['response']}\n")
     except openai.APIError as error:
         report(call, error)
 

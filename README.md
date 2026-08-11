@@ -97,7 +97,7 @@ uv run main.py 1041
 ticket 1041  |  http://localhost:8000/v1/
 
 --- IN-PROCESS STATE (at start) ---
-provider=openai  analysis=none
+provider=openai  analysis=MISSING  response=MISSING
 
 --- ANALYSIS (1041) via gpt-4o-mini ---
 ...
@@ -110,7 +110,7 @@ Tokens maxed out on gpt-4o-mini. Retrying will not help.
 Fall back to Anthropic models.
 
 --- IN-PROCESS STATE (at exit) ---
-provider=anthropic  analysis=467 chars
+provider=anthropic  analysis=COMPLETED  response=MISSING
 ```
 
 The analysis was produced and billed. The app worked out that OpenAI is spent
@@ -134,7 +134,7 @@ uv run main.py 1041
 ticket 1041  |  http://localhost:8000/v1/
 
 --- IN-PROCESS STATE (at start) ---
-provider=openai  analysis=none
+provider=openai  analysis=MISSING  response=MISSING
 
 --- FAILED on analysis via gpt-4o-mini ---
 RateLimitError / HTTP 429 / insufficient_quota: ...
@@ -144,12 +144,13 @@ Tokens maxed out on gpt-4o-mini. Retrying will not help.
 Fall back to Anthropic models.
 
 --- IN-PROCESS STATE (at exit) ---
-provider=anthropic  analysis=none
+provider=anthropic  analysis=MISSING  response=MISSING
 ```
 
 Compare the two state blocks across the runs. Run 1 ended with
-`provider=anthropic, analysis=467 chars`. Run 2 begins with
-`provider=openai, analysis=none` — the process is new, so the dict is new.
+`provider=anthropic, analysis=COMPLETED`. Run 2 begins with
+`provider=openai, analysis=MISSING` — the process is new, so the dict is new.
+The analysis was completed and billed, and the state line says it is gone.
 
 Three things went wrong here, and none of them are fixable in-process:
 
