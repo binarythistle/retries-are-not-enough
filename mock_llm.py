@@ -30,6 +30,37 @@ load_dotenv()
 # the first request happens to flush the buffer.
 sys.stdout.reconfigure(line_buffering=True)
 
+# Colour is written into mock.log deliberately. The Mock Server tab reads the
+# file with `tail -f`, so the escape codes in it are what the attendee's
+# terminal renders. The usual isatty() check would disable colour in exactly the
+# case that needs it, because stdout here is a redirect to the log, never a tty.
+# NO_COLOR=1 or MOCK_COLOR=0 turns it off.
+COLOR = os.environ.get("MOCK_COLOR", "1") != "0" and not os.environ.get("NO_COLOR")
+
+
+def sgr(code):
+    return f"\033[{code}m" if COLOR else ""
+
+
+RESET, BOLD, DIM = sgr(0), sgr(1), sgr(2)
+HEADER = sgr("38;5;110")
+
+
+def tint(status):
+    """Line colour keyed to the HTTP status.
+
+    Applied to the whole line, never around the status number itself. The
+    challenge check scripts grep mock.log for patterns like
+    "analysis .* -> 200", and an escape sequence inserted mid-pattern would stop
+    them matching.
+    """
+    if status == 200:
+        return sgr("38;5;114")  # green
+    if 400 <= status < 500:
+        return sgr("38;5;179")  # amber
+    return sgr("38;5;174")  # red
+
+
 RECORDINGS = os.environ.get("RECORDINGS", "recordings/gpt-4o-mini")
 MODEL = os.environ.get("MODEL", "gpt-4o-mini")
 PORT = int(os.environ.get("PORT", "8000"))
@@ -131,11 +162,13 @@ class Handler(BaseHTTPRequestHandler):
         retries = self.headers.get("x-stainless-retry-count", "?")
 
         count += 1
+        # The leading bar gives the tiled pane a consistent spine, so the mock's
+        # output is distinguishable from the app's at a glance.
         print(
-            f"[{count}] {kind:<8} ticket={ticket_id} "
+            f"{tint(status)}▎[{count}] {kind:<8} ticket={ticket_id} "
             f"retry={retries} seen={attempt + 1} "
             f"-> {status}{' (latched)' if latched else ''} "
-            f"(waiting {DELAY_SECONDS}s)"
+            f"(waiting {DELAY_SECONDS}s){RESET}"
         )
         time.sleep(DELAY_SECONDS)
 
@@ -185,13 +218,24 @@ class Handler(BaseHTTPRequestHandler):
         pass  # our own one-line log above is enough
 
 
-print(f"Serving {len(RECORDED)} recordings from {RECORDINGS} on port {PORT}")
-print(f"  tickets: {', '.join(sorted({t for t, _ in RECORDED}))}")
-print(f"  delay:   {DELAY_SECONDS}s per response")
+# Bind before announcing. The banner used to print first, which meant
+# "Serving" appeared in mock.log even when the bind failed with "Address
+# already in use", and the setup scripts polling for that word handed the
+# attendee a sandbox with no mock server running. Bind first and a failure is
+# a traceback with no banner, which is what the readiness poll should see.
+server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+
+print(f"{HEADER}{BOLD}▎ MOCK LLM SERVER{RESET}")
+# "Serving" is load-bearing. The per-challenge setup scripts poll
+# `grep -q "Serving" mock.log` to know the server is up before handing the
+# sandbox to the attendee. Renaming this line hangs every challenge start.
+print(f"{HEADER}▎{RESET} Serving {len(RECORDED)} recordings from {RECORDINGS} on port {PORT}")
+print(f"{HEADER}▎{RESET} tickets: {', '.join(sorted({t for t, _ in RECORDED}))}")
+print(f"{HEADER}▎{RESET} delay:   {DELAY_SECONDS}s per response")
 for kind, sequence in STATUS.items():
-    print(f"  {kind:<8} -> {','.join(str(s) for s in sequence)}")
+    print(f"{HEADER}▎{RESET} {kind:<8} -> {','.join(str(s) for s in sequence)}")
 if STICKY_STATUS:
-    print(f"  sticky   -> once {STICKY_STATUS} is served, everything returns it")
-print("  log key: retry = the app's own counter, back to 0 whenever it restarts")
-print("           seen  = calls of that kind this server has served, ever")
-ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
+    print(f"{HEADER}▎{RESET} sticky   -> once {STICKY_STATUS} is served, everything returns it")
+print(f"{HEADER}▎{RESET}{DIM} log key: retry = the app's own counter, back to 0 on restart{RESET}")
+print(f"{HEADER}▎{RESET}{DIM}          seen  = calls of that kind served, ever{RESET}")
+server.serve_forever()
