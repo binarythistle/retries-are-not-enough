@@ -1,0 +1,21 @@
+# Build context exclusions for the Instruqt sandbox image.
+#
+# .venv is the critical one: it is built on macOS/arm64 and contains
+# *-darwin.so extension modules. Baking it would shadow the Linux venv that
+# `uv sync` creates inside the image.
+
+.venv/
+__pycache__/
+*.pyc
+
+.git/
+.github/
+docker/
+
+# Real secrets. The image ships .env.example; each challenge writes its own .env.
+.env
+
+# Authoring artefacts, not workshop content.
+instruqt-notes.md
+ideation.md
+mock.log
