@@ -13,11 +13,34 @@
 set -uo pipefail
 
 ADDRESS="127.0.0.1:7233"
+UI="http://127.0.0.1:8233/"
 LOG=/root/temporal-server.log
 
+# Wait for the Web UI to actually serve, not just the frontend to be healthy.
+#
+# These are two different servers and the UI comes up a beat behind the
+# frontend. Waiting only on cluster health returns "healthy" while the UI still
+# 500s, and Instruqt's service tab hits the UI the moment the challenge
+# renders. The attendee sees an error and has to know to refresh, which in a
+# room of 30 is 30 people who do not.
+wait_for_ui() {
+  for _ in $(seq 1 60); do
+    if curl -sf -o /dev/null --max-time 2 "$UI"; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
 if temporal operator cluster health --address "$ADDRESS" >/dev/null 2>&1; then
-  echo "temporal dev server already healthy"
-  exit 0
+  if wait_for_ui; then
+    echo "temporal dev server already healthy, Web UI serving"
+    exit 0
+  fi
+  echo "frontend is healthy but the Web UI on :8233 is not serving" >&2
+  tail -n 30 "$LOG" >&2
+  exit 1
 fi
 
 # State is a SQLite file, per-attendee and per-sandbox, discarded on teardown.
@@ -33,8 +56,13 @@ nohup temporal server start-dev \
 # the dev server and fails intermittently under load.
 for _ in $(seq 1 60); do
   if temporal operator cluster health --address "$ADDRESS" >/dev/null 2>&1; then
-    echo "temporal dev server healthy on ${ADDRESS}, Web UI on :8233"
-    exit 0
+    if wait_for_ui; then
+      echo "temporal dev server healthy on ${ADDRESS}, Web UI serving on :8233"
+      exit 0
+    fi
+    echo "frontend came up but the Web UI on :8233 never served" >&2
+    tail -n 30 "$LOG" >&2
+    exit 1
   fi
   sleep 1
 done
