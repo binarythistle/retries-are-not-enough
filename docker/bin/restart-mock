@@ -1,0 +1,12 @@
+#!/bin/bash
+# Restart the mock LLM server.
+#
+# The mock reads .env once at import time, so a config change needs a process
+# restart. This also clears the sticky latch, because `latched` is module state
+# that dies with the process.
+cd /root/workshop
+pkill -f mock_llm.py || true
+sleep 1
+nohup uv run mock_llm.py >> mock.log 2>&1 &
+sleep 2
+tail -n 12 mock.log

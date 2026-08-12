@@ -8,7 +8,9 @@
 #   docker build -f docker/Dockerfile -t <tag> .
 #
 # Instruqt sandboxes are linux/amd64. Build in CI, or pass --platform
-# linux/amd64 if you build from an Apple Silicon Mac.
+# linux/amd64 if you build from an Apple Silicon Mac. The Temporal CLI download
+# below is amd64-only, so a native arm64 build fails fast at `temporal
+# --version` rather than producing an image that dies at lab start.
 
 FROM python:3.14-slim
 
@@ -28,6 +30,16 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 # download inside the sandbox.
 ENV UV_PYTHON_PREFERENCE=only-system
 
+# --- Temporal CLI ---------------------------------------------------------------
+# Pinned deliberately. `latest` would make the image non-reproducible and could
+# change the dev server's behaviour between a rehearsal and the live session.
+ARG TEMPORAL_CLI_VERSION=1.8.2
+RUN curl -sSL \
+      "https://github.com/temporalio/cli/releases/download/v${TEMPORAL_CLI_VERSION}/temporal_cli_${TEMPORAL_CLI_VERSION}_linux_amd64.tar.gz" \
+    | tar -xz -C /usr/local/bin temporal \
+    && chmod +x /usr/local/bin/temporal \
+    && temporal --version
+
 # --- Bake the workshop source -------------------------------------------------
 # /opt/workshop is the pristine read-only copy. The attendee works in
 # /root/workshop, which track setup stages from here.
@@ -43,22 +55,24 @@ WORKDIR /opt/workshop
 # into the attendee's terminal and into mock.log.
 RUN UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy uv sync --frozen
 
-# --- Attendee helper ----------------------------------------------------------
-# The mock server reads .env once at import, so a config change needs a
-# restart. This is the command the assignments tell attendees to run.
-RUN printf '%s\n' \
-      '#!/bin/bash' \
-      'cd /root/workshop' \
-      'pkill -f mock_llm.py || true' \
-      'sleep 1' \
-      'nohup uv run mock_llm.py >> mock.log 2>&1 &' \
-      'sleep 2' \
-      'tail -n 12 mock.log' \
-    > /usr/local/bin/restart-mock \
-    && chmod +x /usr/local/bin/restart-mock
+# --- Attendee helpers -----------------------------------------------------------
+# restart-mock  : restart the mock LLM server after an .env change.
+# start-temporal: bring up the dev server, idempotently. Challenge 05 onward.
+#
+# These ship as real files under docker/bin/ rather than being generated with
+# printf, because they are long enough that generating them is unreadable.
+# Dockerfile heredocs would be the other option but need the
+# docker/dockerfile:1 frontend, which adds a Docker Hub pull to every CI build.
+# docker/ is then removed from the baked tree so the attendee never sees it.
+RUN install -m 0755 /opt/workshop/docker/bin/* /usr/local/bin/ \
+    && rm -rf /opt/workshop/docker \
+    && ls -l /usr/local/bin/restart-mock /usr/local/bin/start-temporal
 
 # --- Shell environment --------------------------------------------------------
-RUN echo 'cd /root/workshop' >> /root/.bashrc
+# TEMPORAL_ADDRESS saves every `temporal` command in the assignments needing an
+# --address flag. Overridable, so pointing at Temporal Cloud later is one export.
+RUN echo 'cd /root/workshop' >> /root/.bashrc \
+    && echo 'export TEMPORAL_ADDRESS="${TEMPORAL_ADDRESS:-127.0.0.1:7233}"' >> /root/.bashrc
 
 WORKDIR /root
 CMD ["/bin/bash"]

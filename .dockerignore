@@ -10,7 +10,10 @@ __pycache__/
 
 .git/
 .github/
-docker/
+
+# docker/ is deliberately NOT excluded. The Dockerfile installs the helper
+# scripts from docker/bin/ and then deletes the directory out of the baked
+# tree, so the attendee never sees it.
 
 # Real secrets. The image ships .env.example; each challenge writes its own .env.
 .env

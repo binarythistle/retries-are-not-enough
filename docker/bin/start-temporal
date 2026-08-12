@@ -1,0 +1,44 @@
+#!/bin/bash
+# Start the Temporal dev server, unless it is already up.
+#
+# Idempotent on purpose. Challenge 05 onward each call this from their setup
+# script, and only the first one does any work. Later challenges find a healthy
+# server and return immediately, so switching between Temporal challenges costs
+# nothing and never restarts the server underneath a running workflow.
+#
+# --ip 0.0.0.0 is load-bearing. Instruqt's service tab proxies into the sandbox
+# from outside the container's loopback. Bound to 127.0.0.1 the Web UI is
+# invisible to the tab and the attendee sees an empty frame. This is the same
+# reason mock_llm.py cannot be a service tab: it binds 127.0.0.1.
+set -uo pipefail
+
+ADDRESS="127.0.0.1:7233"
+LOG=/root/temporal-server.log
+
+if temporal operator cluster health --address "$ADDRESS" >/dev/null 2>&1; then
+  echo "temporal dev server already healthy"
+  exit 0
+fi
+
+# State is a SQLite file, per-attendee and per-sandbox, discarded on teardown.
+# Nothing shared, nothing to provision, no namespace collisions between
+# attendees.
+nohup temporal server start-dev \
+  --ip 0.0.0.0 \
+  --db-filename /root/temporal.db \
+  --log-level warn \
+  >> "$LOG" 2>&1 &
+
+# The health wait matters. Without it the first command in a challenge races
+# the dev server and fails intermittently under load.
+for _ in $(seq 1 60); do
+  if temporal operator cluster health --address "$ADDRESS" >/dev/null 2>&1; then
+    echo "temporal dev server healthy on ${ADDRESS}, Web UI on :8233"
+    exit 0
+  fi
+  sleep 1
+done
+
+echo "temporal dev server did not become healthy within 60s" >&2
+tail -n 30 "$LOG" >&2
+exit 1
