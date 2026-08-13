@@ -1,10 +1,24 @@
 #!/bin/bash
-# Start the Temporal dev server, unless it is already up.
+# Start the Temporal dev server.
 #
-# Idempotent on purpose. Challenge 05 onward each call this from their setup
-# script, and only the first one does any work. Later challenges find a healthy
-# server and return immediately, so switching between Temporal challenges costs
-# nothing and never restarts the server underneath a running workflow.
+#   start-temporal            idempotent; returns at once if already healthy
+#   start-temporal --fresh    wipe all Temporal state first, then start
+#
+# Plain mode is idempotent on purpose: only the first caller does any work, so
+# switching between challenges costs nothing.
+#
+# --fresh is what the per-challenge setup scripts actually use, and it exists
+# for two reasons. The second matters more than the first.
+#
+#  1. Check scripts assert on a known workflow id. A completed ticket-1041 left
+#     behind by the previous challenge makes the next challenge's check pass
+#     before the attendee has done anything at all.
+#  2. The Temporal UI tab starts empty, so the attendee sees exactly one
+#     workflow rather than an accumulating pile from earlier chapters.
+#
+# The cost is real and was accepted deliberately: every Temporal challenge now
+# pays a full server start instead of finding a healthy one. A few seconds on
+# each challenge entry rather than once for the track.
 #
 # --ip 0.0.0.0 is load-bearing. Instruqt's service tab proxies into the sandbox
 # from outside the container's loopback. Bound to 127.0.0.1 the Web UI is
@@ -15,6 +29,25 @@ set -uo pipefail
 ADDRESS="127.0.0.1:7233"
 UI="http://127.0.0.1:8233/"
 LOG=/root/temporal-server.log
+DB=/root/temporal.db
+
+# Reject anything that is not --fresh rather than ignoring it. A typo would
+# silently skip the wipe, and the symptom of that is a check script passing
+# when it should not — which is the exact bug --fresh exists to prevent, and
+# one of the harder ones to spot from the outside.
+if [ $# -gt 0 ]; then
+  if [ "$1" != "--fresh" ] || [ $# -gt 1 ]; then
+    echo "usage: start-temporal [--fresh]" >&2
+    exit 2
+  fi
+
+  # SQLite leaves -wal and -shm alongside the main file. Deleting only
+  # temporal.db can leave the server recovering the state you meant to discard.
+  pkill -f "temporal server start-dev" || true
+  sleep 2
+  rm -f "$DB" "$DB-wal" "$DB-shm"
+  : > "$LOG"
+fi
 
 # Wait for the Web UI to actually serve, not just the frontend to be healthy.
 #
@@ -48,7 +81,7 @@ fi
 # attendees.
 nohup temporal server start-dev \
   --ip 0.0.0.0 \
-  --db-filename /root/temporal.db \
+  --db-filename "$DB" \
   --log-level warn \
   >> "$LOG" 2>&1 &
 
