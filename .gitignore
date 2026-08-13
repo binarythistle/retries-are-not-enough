@@ -4,3 +4,5 @@ __pycache__/
 *.pyc
 instruqt-notes.md
 mock.log
+worker.log
+temporal.db*

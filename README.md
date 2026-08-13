@@ -2,6 +2,10 @@
 
 A support-ticket pipeline that makes two LLM calls: one to analyse a ticket, one to draft a reply.
 
+Two versions of it: `main.py`, which does the obvious thing and breaks in
+instructive ways, and a Temporal version alongside it that does not. Everything
+below up to "The Temporal version" is about `main.py`.
+
 ## Setup
 
 ```bash
@@ -230,6 +234,138 @@ worker never reaches "exhausted" — so it never gives up, never escalates, and
 never tells anyone. It just retries forever, a handful of attempts at a time,
 while `seen` climbs without limit.
 
+## The Temporal version
+
+The same pipeline, run as a Temporal Workflow. `main.py` is untouched — the two
+versions sit side by side so they can be read against each other.
+
+Where `main.py` is one process that decides what to do and does it, this splits
+into two: a **worker** that does the work, and a **starter** that asks for it.
+Kill the starter after a run has begun and the ticket is still handled.
+
+### What runs
+
+Four processes, so four terminals.
+
+| # | Terminal | Command |
+| --- | --- | --- |
+| 1 | Temporal dev server | `temporal server start-dev --ip 127.0.0.1 --db-filename temporal.db --log-level warn` |
+| 2 | Mock LLM server | `uv run mock_llm.py` |
+| 3 | Worker — leave running | `uv run worker.py` |
+| 4 | Starter | `uv run main_temporal.py 1041` |
+
+The Web UI is on http://localhost:8233. Wait for the worker to print
+`worker ready: 127.0.0.1:7233, task queue 'tickets'` before starting a run —
+though starting one first is worth trying deliberately, because the workflow
+does not fail. It waits until a worker appears.
+
+Requires the Temporal CLI: `brew install temporal`.
+
+### What to look for
+
+Run scenario 1 (`ANALYSIS_STATUS=200`, `RESPONSE_STATUS=200`) and the output is
+the same analysis and reply as `uv run main.py 1041`, from the same recordings.
+Two things differ.
+
+**The state block is read over the network.** `main.py` prints a dict from its
+own memory. `main_temporal.py` gets the same three fields with a Query, from a
+process that does not own them — which also works from anywhere else, during a
+run or long after it has finished:
+
+```bash
+temporal workflow query --workflow-id ticket-1041 --type get_state
+```
+
+**The `retry` column in the mock log is dead.** The Temporal version sets
+`max_retries=0` on the OpenAI client, so the SDK never retries and never sends
+its retry header. Retries belong to the Workflow's `RetryPolicy` now
+(`workflow.py`), so `retry=` stays `0` and **`seen=` is the column that climbs.**
+
+### Why the starter's output arrives all at once
+
+Run the two side by side and the pacing differs. `main.py` prints the analysis,
+pauses, then prints the reply. `main_temporal.py` prints the `at start` state
+immediately, pauses, then prints everything else in one go — while the mock log
+ticks along call by call in both cases.
+
+This is not buffering. `main.py` prints the analysis the moment it has it
+because it *is* the process making the call:
+
+```python
+state["analysis"] = understand(ticket)   # main.py
+print(... ANALYSIS ...)                  # prints now
+```
+
+`main_temporal.py` is not making the calls. The worker is. The starter's only
+line of sight is `await handle.result()`, which returns when the whole workflow
+is done, so there is nothing it could print sooner.
+
+**This is left as-is deliberately.** It could be made to match `main.py` by
+polling the Query in the background and printing each field as it appears, but
+that adds machinery to hide something true and worth saying out loud: the
+process you are watching is not the process doing the work. That is exactly why
+you can kill the starter mid-run and the ticket still gets handled.
+
+The value is not lost in the meantime — it is just somewhere else. Start a run,
+and about four seconds in, from a third terminal:
+
+```bash
+temporal workflow query --workflow-id ticket-1041 --type get_state
+```
+
+```
+analysis  = "- **Core Problem:** The customer is unable to receive..."
+response  = null
+```
+
+The first call's result is complete and readable while the second is still in
+flight. `main.py` has no equivalent — its analysis exists only inside a process
+that has not finished, and cannot be asked for it.
+
+### Workshop: killing the worker mid-run
+
+The counterpart to scenario 9, and the point of the whole exercise. With
+`DELAY_SECONDS=2` and scenario 1 active:
+
+**1. Start a run** in the starter terminal:
+
+```bash
+uv run main_temporal.py 1043
+```
+
+**2. After about 4 seconds**, Ctrl+C the **worker**. The analysis call has
+completed by then and the response call is in flight.
+
+**3. Restart the worker**: `uv run worker.py`
+
+The run finishes on its own and the starter, which never noticed, prints the
+reply. The mock log:
+
+```
+[9]  analysis ticket=1043 retry=0 seen=5 -> 200     completed before the kill
+[10] response ticket=1043 retry=0 seen=5 -> 200     in flight when killed
+[11] response ticket=1043 retry=0 seen=6 -> 200     retried after the restart
+```
+
+One analysis call, two response calls. Compare against scenario 9, where a
+Ctrl+C sends the app back to the start: the analysis is re-called and re-billed,
+and the retry counter resets to 0. Here the completed step is not repeated,
+because its result is recorded rather than remembered. Only the step that was
+genuinely interrupted runs again.
+
+Open the workflow in the Web UI afterwards and the event history shows it: one
+`ActivityTaskCompleted` for the analysis, two attempts at the response.
+
+### Two things that will catch you out
+
+- **Changing `.env` means restarting the mock *and* the worker.** `activities.py`
+  reads `.env` at import exactly as `mock_llm.py` does, so a worker left running
+  from an earlier scenario holds stale config. `restart-mock` only covers the mock.
+- **`MAX_RETRIES` does nothing here.** The retry budget lives in `workflow.py` as
+  a `RetryPolicy`, deliberately: workflow code is replayed, and reading the
+  environment during a replay could give a different answer than the original
+  run. Change the policy in the file.
+
 ## Layout
 
 | Path | |
@@ -238,3 +374,12 @@ while `seen` climbs without limit.
 | `mock_llm.py` | Fake `/v1/chat/completions` that replays recordings |
 | `tickets/` | Input tickets, one per file, named by ticket number |
 | `recordings/` | Recorded real responses, per model |
+
+The Temporal version, which leaves `main.py` alone:
+
+| Path | |
+| --- | --- |
+| `workflow.py` | `TicketWorkflow` — read this against `main()` in `main.py` |
+| `activities.py` | The LLM calls and the ticket read. Same prompts as `main.py` |
+| `worker.py` | The process that runs workflows and activities |
+| `main_temporal.py` | Starts a run and waits for it, mirroring `uv run main.py 1041` |
