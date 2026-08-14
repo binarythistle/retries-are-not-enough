@@ -1,6 +1,7 @@
 import os
 import pathlib
 import sys
+import time
 
 import openai
 from dotenv import load_dotenv
@@ -18,6 +19,13 @@ MODELS = {
 state = {"provider": "openai", "analysis": None, "response": None}
 
 MAX_RETRIES = int(os.environ.get("MAX_RETRIES", "2"))
+
+# How long to wait before failing over to a second provider. Backing off before a
+# failover is ordinary caution — you do not want to hammer a new provider the
+# instant the first one hiccups — and it is the window the workshop asks you to
+# interrupt, which is why it is a knob rather than a literal: the right value on a
+# projector is not the right value at a desk.
+FALLBACK_PAUSE_SECONDS = float(os.environ.get("FALLBACK_PAUSE_SECONDS", "5"))
 
 client = OpenAI(max_retries=MAX_RETRIES)
 
@@ -93,10 +101,11 @@ def respond(ticket, analysis):
 
 
 def report(call, error):
-    """Print the failure legibly. No retry, no recovery — the run still dies."""
-    if os.environ.get("TRACEBACK"):
-        raise error
+    """Print the failure legibly, and hand back the error `code` if it carried one.
 
+    Reporting only. What to do about it is main()'s decision, because for one
+    particular code there is something worth doing.
+    """
     status = getattr(error, "status_code", None)
     body = getattr(error, "body", None) or {}
     detail = body.get("message") if isinstance(body, dict) else None
@@ -111,22 +120,41 @@ def report(call, error):
     print(paint(RED, f"--- FAILED on {call} via {model()} ---"))
     print(paint(RED, f"{' / '.join(label)}: {detail or error}") + "\n")
 
-    # Terminal conditions can't be retried away, so the only move left is a
-    # different provider. Record the decision in state — where it will sit until
-    # this process exits, a few lines from now.
-    if code == "insufficient_quota":
-        state["provider"] = "anthropic"
-        print(paint(DIM, "--- DECISION ---"))
-        print(
-            paint(
-                DIM,
-                f"Tokens maxed out on {MODELS['openai']}. Retrying will not help.",
-            )
-        )
-        print(paint(DIM, "Fall back to Anthropic models.") + "\n")
+    return code
 
-    show_state("at exit")
-    raise SystemExit(1)
+
+def fall_back():
+    """Switch provider, and say so.
+
+    A terminal condition cannot be retried away, so the only move left is a
+    different provider. Nothing about this is hard — which is the point. The app
+    works the right answer out on its own, in one process, with no help.
+
+    What it cannot do is keep the answer. `state` is this process's memory, so the
+    conclusion below survives exactly as long as the process does. The pause makes
+    that window long enough to see.
+    """
+    state["provider"] = "anthropic"
+
+    print(paint(DIM, "--- DECISION ---"))
+    print(
+        paint(DIM, f"Tokens maxed out on {MODELS['openai']}. Retrying will not help.")
+    )
+    print(paint(DIM, "Fall back to Anthropic models."))
+    # flush, because the attendee times a Ctrl+C off this line and it is the one
+    # print in the file whose timing is load-bearing. A redirect to a log file
+    # block-buffers otherwise, and the pause looks like a hang.
+    print(
+        paint(
+            DIM,
+            f"Waiting {FALLBACK_PAUSE_SECONDS:g}s before failing over "
+            f"to {MODELS['anthropic']}...",
+        )
+        + "\n",
+        flush=True,
+    )
+
+    time.sleep(FALLBACK_PAUSE_SECONDS)
 
 
 def main():
@@ -143,18 +171,42 @@ def main():
     )
     show_state("at start")
 
-    call = "analysis"
-    try:
-        state["analysis"] = understand(ticket)
-        print(paint(GREEN, f"--- ANALYSIS ({ticket_id}) via {model()} ---"))
-        print(f"{state['analysis']}\n")
+    while True:
+        try:
+            # Each step is skipped if state already has it, so a retry after a
+            # provider switch does not redo a call this process already made.
+            #
+            # Note the limit of that, because it is the whole workshop: it only
+            # holds *within* this process. state is a dict in memory, so a run
+            # that starts fresh sees both of these as MISSING however much was
+            # completed and paid for last time.
+            if state["analysis"] is None:
+                state["analysis"] = understand(ticket)
+                print(paint(GREEN, f"--- ANALYSIS ({ticket_id}) via {model()} ---"))
+                print(f"{state['analysis']}\n")
 
-        call = "response"
-        state["response"] = respond(ticket, state["analysis"])
-        print(paint(GREEN, f"--- RESPONSE ({ticket_id}) via {model()} ---"))
-        print(f"{state['response']}\n")
-    except openai.APIError as error:
-        report(call, error)
+            if state["response"] is None:
+                state["response"] = respond(ticket, state["analysis"])
+                print(paint(GREEN, f"--- RESPONSE ({ticket_id}) via {model()} ---"))
+                print(f"{state['response']}\n")
+
+            break
+        except openai.APIError as error:
+            if os.environ.get("TRACEBACK"):
+                raise
+
+            # Which call failed is whichever one state is still missing.
+            call = "analysis" if state["analysis"] is None else "response"
+            code = report(call, error)
+
+            # One fallback, and only from the provider we started on. Anthropic
+            # hitting the same wall leaves nowhere left to go.
+            if code == "insufficient_quota" and state["provider"] == "openai":
+                fall_back()
+                continue
+
+            show_state("at exit")
+            raise SystemExit(1)
 
     show_state("at exit")
 

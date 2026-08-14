@@ -29,11 +29,26 @@ Configure in `.env` (or as an env var, which wins):
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `DELAY_SECONDS` | `2` | Wait before each response, so replays feel like real calls |
-| `RECORDINGS` | `recordings/gpt-4o-mini` | Which recordings to serve |
+| `MODEL` | `gpt-4o-mini` | The **primary** model — the one the failure scenarios below apply to |
+| `RECORDINGS` | `recordings/gpt-4o-mini` | Fallback recordings, for a model with no directory of its own |
 | `PORT` | `8000` | Port to listen on |
 
 The delay applies per response, so a run costs twice `DELAY_SECONDS`.
 Recordings load at startup — restart after editing a `.txt`.
+
+**One mock, several models.** Every directory under `recordings/` is loaded at
+startup and **the directory name is the model name**, so a request for
+`claude-opus-5` is answered from `recordings/claude-opus-5`. The banner lists what
+it found. This is what lets the app fall back from one provider to another and get
+real recorded replies from both.
+
+Two things follow, and both matter for the scenarios below:
+
+- **The status sequences apply to the primary model only.** A request for any
+  other model is a fallback, and is served normally — a fallback that returned the
+  same failure would be no escape at all.
+- **`STICKY_STATUS` latches per model, not globally.** Exhausted quota belongs to
+  an account, so latching `gpt-4o-mini` leaves `claude-opus-5` working.
 
 ## 2. Run the app
 
@@ -57,23 +72,34 @@ OPENAI_BASE_URL=https://api.openai.com/v1 uv run main.py 1041
 attempt plus that many retries. It is an **app** setting: the mock never reads it,
 it only sees the requests the budget produces.
 
+`FALLBACK_PAUSE_SECONDS` (default `5`) is how long the app waits before failing
+over to a second provider. Backing off before failover is ordinary caution — you
+don't want to hammer a new provider the instant the first one hiccups — and it is
+also the window scenario 8 asks you to interrupt. Also an **app** setting.
+
 ## 3. Failure scenarios
 
-`.env` carries eight numbered scenarios; uncomment one and **restart the mock
+`.env` carries nine numbered scenarios; uncomment one and **restart the mock
 server**. Forgetting the restart is the most common mistake — the banner always
 prints the active config, so check it there.
 
-## Workshop: scenario 8 — quota exhausted
+## Workshop: scenario 8 — the decision that didn't survive
 
-Shows retries being spent on a failure they cannot fix, and completed work being
-lost with no way to recreate it. No process kill needed: just run it twice.
+The app hits a wall it can't retry its way past, works out the right move, and
+then dies before it can act on it.
 
-**Optional warm-up.** Run scenario 2 (`RESPONSE_STATUS=500,500,200`) first to see
-retries doing their job — two failures, third attempt succeeds. It makes the
-contrast honest.
+**The fallback is not what fails here.** The app handles the quota wall correctly
+and completely: it reads the error, works out that OpenAI is spent, switches to
+Anthropic, and finishes the ticket. Twelve lines of `try`/`except`. You do not
+need durable execution for that, and this scenario does not pretend you do.
 
-**1. Enable scenario 8.** In `.env`, uncomment scenario 8's three lines and
-comment out any other scenario:
+What fails is *remembering*. Kill the process in the seconds between the decision
+and the call that acts on it, and everything it just paid to learn goes with it —
+so the next run starts by calling the provider it had already ruled out, and
+redoing work it had already completed.
+
+**1. Enable scenario 8.** In `.env`, uncomment scenario 8's lines and comment out
+any other scenario:
 
 ```
 ANALYSIS_STATUS=200
@@ -81,28 +107,32 @@ RESPONSE_STATUS=429
 STICKY_STATUS=429
 ```
 
-`DELAY_SECONDS=1` keeps each run under 7 seconds.
+`DELAY_SECONDS=1` and `FALLBACK_PAUSE_SECONDS=5` are comfortable at a desk. On a
+projector, give yourself 10.
 
 **2. Restart the mock server.** Confirm the banner shows:
 
 ```
+  primary: gpt-4o-mini  (the statuses below apply to it)
   analysis -> 200
   response -> 429
-  sticky   -> once 429 is served, everything returns it
+  sticky   -> once 429 is served, that model returns it for everything
 ```
 
-**3. First run.**
+`sticky` is what makes the wall a wall: once `gpt-4o-mini` has served a 429, it
+serves nothing else, across restarts, until you restart the mock. The latch is per
+model, so `claude-opus-5` keeps working — which is what makes the fallback a real
+escape route rather than a second dead end.
+
+### First, watch it work
+
+Run it once and **let it finish**:
 
 ```bash
 uv run main.py 1041
 ```
 
 ```
-ticket 1041  |  http://localhost:8000/v1/
-
---- IN-PROCESS STATE (at start) ---
-provider=openai  analysis=MISSING  response=MISSING
-
 --- ANALYSIS (1041) via gpt-4o-mini ---
 ...
 
@@ -112,63 +142,108 @@ RateLimitError / HTTP 429 / insufficient_quota: ...
 --- DECISION ---
 Tokens maxed out on gpt-4o-mini. Retrying will not help.
 Fall back to Anthropic models.
+Waiting 5s before failing over to claude-opus-5...
+
+--- RESPONSE (1041) via claude-opus-5 ---
+...
 
 --- IN-PROCESS STATE (at exit) ---
-provider=anthropic  analysis=COMPLETED  response=MISSING
+provider=anthropic  analysis=✔ COMPLETED  response=✔ COMPLETED
 ```
 
-The analysis was produced and billed. The app worked out that OpenAI is spent
-and Anthropic is the way forward, and wrote both facts into `state` — the
-in-memory dict that is the app's entire memory.
+The ticket is handled. Nothing is broken and nothing was lost. Note the mock log
+though — the app made one response call and the mock served **three**, because a
+429 is retryable by status code and the SDK has no idea this one isn't. Three
+attempts against a wall before the app ever sees the error.
 
-In the mock log, Call 2 made **three** attempts. The code made one call. `429`
-means "retryable", but `insufficient_quota` means "terminal" — nothing about the
-status code or the Python exception type distinguishes the two.
+**Restart the mock server** to clear the latch before continuing.
 
-The app works out the right move, and then the process ends. The decision is
-never acted on, and nothing records that it was ever made.
+### Now crash it
 
-**4. Second run.** Same command again:
+Same command, but this time interrupt it:
+
+```bash
+uv run main.py 1041
+```
+
+When you see `Waiting 5s before failing over...`, press **Ctrl+C**. You'll get a
+`KeyboardInterrupt` traceback, which is what a crash looks like — an evicted pod
+or an OOM kill gets you to the same place with less warning.
+
+```
+[1] analysis ticket=1041 model=gpt-4o-mini retry=0 seen=1 -> 200
+[2] response ticket=1041 model=gpt-4o-mini retry=0 seen=1 -> 429 (latched)
+[3] response ticket=1041 model=gpt-4o-mini retry=1 seen=2 -> 429 (latched)
+[4] response ticket=1041 model=gpt-4o-mini retry=2 seen=3 -> 429 (latched)
+                                                    <- Ctrl+C in the pause
+```
+
+At the moment you killed it, the app knew two things it had paid for: the analysis
+was **done**, and OpenAI was **spent**.
+
+**Run it again.** Same command, no changes:
 
 ```bash
 uv run main.py 1041
 ```
 
 ```
-ticket 1041  |  http://localhost:8000/v1/
-
 --- IN-PROCESS STATE (at start) ---
-provider=openai  analysis=MISSING  response=MISSING
-
---- FAILED on analysis via gpt-4o-mini ---
-RateLimitError / HTTP 429 / insufficient_quota: ...
-
---- DECISION ---
-Tokens maxed out on gpt-4o-mini. Retrying will not help.
-Fall back to Anthropic models.
-
---- IN-PROCESS STATE (at exit) ---
-provider=anthropic  analysis=MISSING  response=MISSING
+provider=openai     analysis=✘ MISSING    response=✘ MISSING
 ```
 
-Compare the two state blocks across the runs. Run 1 ended with
-`provider=anthropic, analysis=COMPLETED`. Run 2 begins with
-`provider=openai, analysis=MISSING` — the process is new, so the dict is new.
-The analysis was completed and billed, and the state line says it is gone.
+That line is the whole scenario. `provider=openai` — it does not know it ruled
+that out four seconds ago. `analysis=MISSING` — it does not know it already has
+one. The dict is new because the process is new.
 
-Three things went wrong here, and none of them are fixable in-process:
+So it does the only thing it can: calls OpenAI again.
 
-- **It went back to OpenAI.** Last run it concluded OpenAI was exhausted and
-  Anthropic was the answer. That conclusion died with the process, so this run
-  starts by calling the provider it already ruled out.
-- **It spent three more requests re-learning it.** The decision wasn't cheap the
-  first time and it wasn't cheap this time either.
-- **The analysis is gone.** No analysis block this run — the work that succeeded
-  and was billed in run 1 cannot be redone, because the quota that paid for it is
-  spent.
+```
+[5] analysis ticket=1041 model=gpt-4o-mini retry=0 seen=2 -> 429 (latched)
+[6] analysis ticket=1041 model=gpt-4o-mini retry=1 seen=3 -> 429 (latched)
+[7] analysis ticket=1041 model=gpt-4o-mini retry=2 seen=4 -> 429 (latched)
+[8] analysis ticket=1041 model=claude-opus-5 retry=0 seen=1 -> 200
+[9] response ticket=1041 model=claude-opus-5 retry=0 seen=1 -> 200
+```
 
-**5. Reset.** Restart the mock server to clear the latch. Until you do, every
-request returns 429 and other scenarios will look broken.
+It gets there. The ticket is answered and the customer is served. Count what it
+cost:
+
+| | |
+| --- | --- |
+| Calls after the crash | **5** |
+| Spent re-learning that OpenAI is exhausted | 3 |
+| Spent redoing an analysis that was already complete and already paid for | 1 |
+| Actual new work | **1** |
+
+Four of those five calls existed only because the process forgot.
+
+### What this does and doesn't prove
+
+Two things went wrong, and both are about memory rather than logic:
+
+- **It forgot the model swap.** The conclusion "OpenAI is spent, use Anthropic"
+  was correct, expensive, and thrown away. So the new process paid three more
+  calls to reach the same conclusion.
+- **It forgot the completed analysis.** That work had already succeeded and
+  already been billed. It was done a second time, on a second provider.
+
+Be precise about the limit, because overclaiming here is easy: **nothing is
+unrecoverable.** The app is not stuck, the ticket is not lost, and no customer
+goes unanswered. It arrives at the right answer — just more expensively, having
+thrown away work it had already paid for. On one ticket that's a rounding error.
+On a queue of ten thousand during a bad deploy, it isn't.
+
+And notice what would have to change to fix it in-process: nothing about the
+retry logic, the fallback, or the error handling — all of that is already correct.
+The only thing missing is somewhere for a decision to live that isn't the memory
+of a process that might not survive the next five seconds.
+
+That is the one thing the Temporal version of this scenario changes. Same crash,
+same second — see "The Temporal version" below.
+
+**Reset.** Restart the mock server to clear the latch. Until you do, every
+`gpt-4o-mini` request returns 429 and other scenarios will look broken.
 
 ## Workshop: scenario 9 — durable retries
 
@@ -370,7 +445,7 @@ Open the workflow in the Web UI afterwards and the event history shows it: one
 
 | Path | |
 | --- | --- |
-| `main.py` | The app — two LLM calls, no retries |
+| `main.py` | The app — two LLM calls, the SDK's retry budget, and a provider fallback |
 | `mock_llm.py` | Fake `/v1/chat/completions` that replays recordings |
 | `tickets/` | Input tickets, one per file, named by ticket number |
 | `recordings/` | Recorded real responses, per model |
