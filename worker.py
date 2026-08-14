@@ -34,6 +34,17 @@ with workflow.unsafe.imports_passed_through():
 TASK_QUEUE = "tickets"
 ADDRESS = os.environ.get("TEMPORAL_ADDRESS", "127.0.0.1:7233")
 
+# Stop temporalio appending the workflow context dict to every Workflow log line.
+# By default a one-line message arrives as
+#   DECISION: ... ({'attempt': 1, 'namespace': 'default', 'run_id': '01a0...',
+#                   'task_queue': 'tickets', 'workflow_id': 'ticket-1041', ...})
+# which buries the part a human is reading. The context is genuinely useful when
+# one worker is running many workflows; here it is one ticket at a time.
+#
+# Presentation, so it lives in the worker rather than in workflow.py. It cannot
+# affect determinism: Workflow logs are suppressed during replay anyway.
+workflow.logger.workflow_info_on_message = False
+
 
 async def main():
     # Connect first, announce second.

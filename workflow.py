@@ -14,6 +14,7 @@ from datetime import timedelta
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
+from temporalio.exceptions import ActivityError
 
 # Imported inside this block because the Workflow sandbox re-imports this
 # module, and activities.py builds an OpenAI client at import time. Passing it
@@ -21,6 +22,8 @@ from temporalio.common import RetryPolicy
 # constructing a second client per Workflow run.
 with workflow.unsafe.imports_passed_through():
     from activities import (
+        MODELS,
+        QUOTA_EXHAUSTED,
         AnalysisInput,
         ResponseInput,
         load_ticket,
@@ -52,6 +55,36 @@ RETRY = RetryPolicy(
 # and applies the policy above.
 ATTEMPT_TIMEOUT = timedelta(seconds=30)
 
+# The DECISION banner, as escape codes rather than a plain string.
+#
+# No isatty() check, unlike main.py, and for two reasons. Workflow code must not
+# read the environment — the rule that keeps the retry policy a literal applies
+# here too. And this output is only ever read by a human: either live in the
+# Worker tab, or in worker.log, which the attendee opens directly. mock_llm.py
+# made the same call for the same reason.
+#
+# Colour the whole line, never the middle of one. Any script that greps worker.log
+# for DECISION must be unanchored or strip escapes first — the third rake this
+# project has stepped on, see "Colour broke every anchored check script".
+BOLD_AMBER = "\033[1;33m"
+RESET = "\033[0m"
+SPINE = f"{BOLD_AMBER}▌{RESET}"
+RULE = f"{BOLD_AMBER}▌{'─' * 62}{RESET}"
+
+# How long to wait before failing over to a second provider.
+#
+# main.py reads this from FALLBACK_PAUSE_SECONDS in .env. This cannot, for the
+# same reason the retry policy above cannot: Workflow code is replayed, and a
+# value read from the environment during a replay could differ from the original
+# run. So it is a literal, and the asymmetry with main.py is the point.
+#
+# The pause is real engineering, not a stage prop — you do not want to hammer a
+# new provider the instant the first one hiccups. But it is also the window the
+# workshop asks you to kill the worker in, and unlike main.py's time.sleep() it
+# is a durable timer held by the server. It keeps running while nothing is alive
+# to wait for it.
+FALLBACK_PAUSE = timedelta(seconds=10)
+
 
 @workflow.defn
 class TicketWorkflow:
@@ -82,7 +115,63 @@ class TicketWorkflow:
             retry_policy=RETRY,
         )
 
-        self.response = await workflow.execute_activity(
+        try:
+            self.response = await self.draft(ticket)
+        except ActivityError as error:
+            # Only one failure is worth catching here: the one that says trying
+            # again will never work. Everything else has already been retried by
+            # the policy and has earned the right to fail.
+            if getattr(error.cause, "type", None) != QUOTA_EXHAUSTED:
+                raise
+
+            # This assignment is the whole challenge. main.py makes the identical
+            # decision in report() (main.py:117) and then exits, taking it with
+            # it. Here it is recorded before anything acts on it, so a crash in
+            # the next ten seconds costs nothing.
+            self.provider = "anthropic"
+
+            # main.py's DECISION block, in the only place a Workflow can print:
+            # the worker's log. Without it the attendee's only cue that the
+            # failover is pending is the tail of a 50-line traceback, and this is
+            # the moment the challenge asks them to kill the worker.
+            #
+            # warning(), not info(), and that is not a style choice: worker.py
+            # configures no logging, so Python's last-resort handler applies and
+            # anything below WARNING is silently dropped. An info() here is
+            # invisible — verified the hard way. Raising it also needs no
+            # basicConfig(), which would switch on temporalio's own INFO chatter
+            # and bury the one line that matters.
+            #
+            # workflow.logger is replay-safe — it stays quiet while replaying, so
+            # a restarted worker does not reprint this.
+            workflow.logger.warning(
+                "\n%s\n%s ⚠️  DECISION: tokens maxed out on %s. Retrying will not help."
+                "\n%s 🔀 Falling back to %s in %ss."
+                "\n%s 💾 provider=anthropic is recorded in the Workflow now,"
+                " not in this process."
+                "\n%s\n",
+                RULE,
+                SPINE,
+                MODELS["openai"],
+                SPINE,
+                MODELS["anthropic"],
+                int(FALLBACK_PAUSE.total_seconds()),
+                SPINE,
+                RULE,
+            )
+
+            # A durable timer, not a sleep in a process. The wait outlives the
+            # worker that started it — kill the worker here and the failover still
+            # happens, on time, once a worker exists again.
+            await workflow.sleep(FALLBACK_PAUSE)
+
+            self.response = await self.draft(ticket)
+
+        return self.response
+
+    async def draft(self, ticket: str) -> str:
+        """The reply, on whichever provider self.provider currently names."""
+        return await workflow.execute_activity(
             respond,
             ResponseInput(
                 ticket=ticket,
@@ -92,8 +181,6 @@ class TicketWorkflow:
             start_to_close_timeout=ATTEMPT_TIMEOUT,
             retry_policy=RETRY,
         )
-
-        return self.response
 
     @workflow.query
     def get_state(self) -> dict:
