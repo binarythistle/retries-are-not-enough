@@ -62,7 +62,11 @@ def tint(status):
 
 
 RECORDINGS = os.environ.get("RECORDINGS", "recordings/gpt-4o-mini")
-MODEL = os.environ.get("MODEL", "gpt-4o-mini")
+
+# The model the app starts on, and more than a label: the status sequences below
+# describe THIS model. A request naming a different model means the app fell back
+# to another provider, which is served on its own terms. See status_for().
+PRIMARY_MODEL = os.environ.get("MODEL", "gpt-4o-mini")
 PORT = int(os.environ.get("PORT", "8000"))
 DELAY_SECONDS = float(os.environ.get("DELAY_SECONDS", "2"))
 
@@ -77,14 +81,38 @@ STATUS = {
     "analysis": statuses("ANALYSIS_STATUS"),
     "response": statuses("RESPONSE_STATUS"),
 }
-attempts = {"analysis": 0, "response": 0}
 
-# Once this status is served, every later request returns it too, whatever the
-# sequences say. Models an account-level failure like exhausted quota, which no
-# amount of retrying or restarting can clear.
+# Keyed by (kind, model) rather than kind alone, so a fallback provider's calls
+# get their own count and cannot advance the primary model's position in its
+# sequence. With one model in play — every challenge before 07 — the numbers come
+# out identical to the fixed two-key version this replaces.
+attempts = {}
+
+# Once this status is served, every later request to that model returns it too,
+# whatever the sequences say. Models an account-level failure like exhausted
+# quota, which no amount of retrying or restarting can clear.
 STICKY_STATUS = os.environ.get("STICKY_STATUS")
 STICKY_STATUS = int(STICKY_STATUS) if STICKY_STATUS else None
-latched = False
+
+# Which models have hit the sticky status. A set rather than a single flag,
+# because exhausted quota belongs to an account and not to this server: latching
+# gpt-4o-mini must not latch whatever the app falls back to, or the fallback
+# could never succeed. With one model in play the behaviour is unchanged.
+latched = set()
+
+
+def status_for(kind, model, seen):
+    """The status this request gets, before the sticky latch is considered.
+
+    The sequences describe the primary model. Another model here means the app
+    fell back to a second provider, and a fallback returning the same failure
+    would leave it nowhere to go — so it is served normally. Nothing has needed a
+    failing fallback yet; this is where that knob would go.
+    """
+    if model != PRIMARY_MODEL:
+        return 200
+    sequence = STATUS[kind]
+    return sequence[seen % len(sequence)]
 
 
 def error_code(status, is_latched):
@@ -119,9 +147,42 @@ def load_titles():
     }
 
 
-RECORDED = load_recordings(RECORDINGS)
+def load_all(root="recordings"):
+    """Map (model, ticket_id, kind) -> recorded text, across every model.
+
+    The directory name IS the model name, so recordings/claude-opus-5 answers
+    requests whose model field is claude-opus-5. That is the entire mechanism
+    behind serving a provider fallback: one mock, two sets of recordings.
+    """
+    out = {}
+    for directory in sorted(pathlib.Path(root).iterdir()):
+        if directory.is_dir():
+            for key, text in load_recordings(directory).items():
+                out[(directory.name, *key)] = text
+    return out
+
+
+RECORDED = load_all()
+
+# A request for a model with no recordings of its own falls back to RECORDINGS.
+# That keeps the optional MODEL knob in .env behaving as it did when this file
+# only knew about one model: point MODEL at anything and it still gets served.
+FALLBACK_MODEL = pathlib.Path(RECORDINGS).name
+RECORDED.update(
+    {(FALLBACK_MODEL, *key): text for key, text in load_recordings(RECORDINGS).items()}
+)
+
+LOADED_MODELS = sorted({model for model, _, _ in RECORDED})
 TITLES = load_titles()
 count = 0
+
+
+def recording(model, ticket_id, kind):
+    """The recorded text for this call, or None if nothing matches."""
+    for key in ((model, ticket_id, kind), (FALLBACK_MODEL, ticket_id, kind)):
+        if key in RECORDED:
+            return RECORDED[key]
+    return None
 
 
 def choose(system, user):
@@ -144,18 +205,22 @@ class Handler(BaseHTTPRequestHandler):
         messages = {m["role"]: m["content"] for m in body["messages"]}
         ticket_id, kind = choose(messages.get("system", ""), messages.get("user", ""))
 
-        global latched
+        # Which model the app asked for. Before challenge 07 this was always the
+        # primary one and the field was ignored; now it decides which recordings
+        # answer, whether the sequences apply, and which latch is checked.
+        model = body.get("model") or PRIMARY_MODEL
 
-        sequence = STATUS[kind]
-        attempt = attempts[kind]
-        attempts[kind] = attempt + 1
+        attempt = attempts.get((kind, model), 0)
+        attempts[(kind, model)] = attempt + 1
 
-        if latched:
+        is_latched = model in latched
+        if is_latched:
             status = STICKY_STATUS
         else:
-            status = sequence[attempt % len(sequence)]
+            status = status_for(kind, model, attempt)
             if status == STICKY_STATUS:
-                latched = True
+                latched.add(model)
+                is_latched = True
 
         # The SDK reports how many times *it* has retried this call. That count
         # lives in the client process, so it restarts from 0 when the app does.
@@ -164,25 +229,35 @@ class Handler(BaseHTTPRequestHandler):
         count += 1
         # The leading bar gives the tiled pane a consistent spine, so the mock's
         # output is distinguishable from the app's at a glance.
+        #
+        # model= is new for challenge 07 and sits between two fields the check
+        # scripts read. It is safe there because every one of them matches either
+        # the "[n] kind " prefix or the " -> status" suffix, never a field index.
         print(
-            f"{tint(status)}▎[{count}] {kind:<8} ticket={ticket_id} "
+            f"{tint(status)}▎[{count}] {kind:<8} ticket={ticket_id} model={model} "
             f"retry={retries} seen={attempt + 1} "
-            f"-> {status}{' (latched)' if latched else ''} "
+            f"-> {status}{' (latched)' if is_latched else ''} "
             f"(waiting {DELAY_SECONDS}s){RESET}"
         )
         time.sleep(DELAY_SECONDS)
 
         if status != 200:
             error = {"message": f"mock server returned {status} for {kind}"}
-            code = error_code(status, latched)
+            code = error_code(status, is_latched)
             if code:
                 error["type"] = error["code"] = code
             return self.send_json(status, {"error": error})
 
-        if (ticket_id, kind) not in RECORDED:
+        text = recording(model, ticket_id, kind)
+        if text is None:
             return self.send_json(
                 400,
-                {"error": {"message": f"no recording for ticket={ticket_id} {kind}"}},
+                {
+                    "error": {
+                        "message": f"no recording for model={model} "
+                        f"ticket={ticket_id} {kind}"
+                    }
+                },
             )
 
         self.send_json(
@@ -191,13 +266,13 @@ class Handler(BaseHTTPRequestHandler):
                 "id": f"chatcmpl-mock-{ticket_id}-{kind}",
                 "object": "chat.completion",
                 "created": 0,
-                "model": MODEL,
+                "model": model,
                 "choices": [
                     {
                         "index": 0,
                         "message": {
                             "role": "assistant",
-                            "content": RECORDED[(ticket_id, kind)],
+                            "content": text,
                         },
                         "finish_reason": "stop",
                     }
@@ -229,13 +304,18 @@ print(f"{HEADER}{BOLD}▎ MOCK LLM SERVER{RESET}")
 # "Serving" is load-bearing. The per-challenge setup scripts poll
 # `grep -q "Serving" mock.log` to know the server is up before handing the
 # sandbox to the attendee. Renaming this line hangs every challenge start.
-print(f"{HEADER}▎{RESET} Serving {len(RECORDED)} recordings from {RECORDINGS} on port {PORT}")
-print(f"{HEADER}▎{RESET} tickets: {', '.join(sorted({t for t, _ in RECORDED}))}")
+print(f"{HEADER}▎{RESET} Serving {len(RECORDED)} recordings on port {PORT}")
+print(f"{HEADER}▎{RESET} models:  {', '.join(LOADED_MODELS)}")
+print(f"{HEADER}▎{RESET} primary: {PRIMARY_MODEL}  (the statuses below apply to it)")
+print(f"{HEADER}▎{RESET} tickets: {', '.join(sorted({t for _, t, _ in RECORDED}))}")
 print(f"{HEADER}▎{RESET} delay:   {DELAY_SECONDS}s per response")
 for kind, sequence in STATUS.items():
     print(f"{HEADER}▎{RESET} {kind:<8} -> {','.join(str(s) for s in sequence)}")
 if STICKY_STATUS:
-    print(f"{HEADER}▎{RESET} sticky   -> once {STICKY_STATUS} is served, everything returns it")
+    print(
+        f"{HEADER}▎{RESET} sticky   -> once {STICKY_STATUS} is served, "
+        f"that model returns it for everything"
+    )
 print(f"{HEADER}▎{RESET}{DIM} log key: retry = the app's own counter, back to 0 on restart{RESET}")
-print(f"{HEADER}▎{RESET}{DIM}          seen  = calls of that kind served, ever{RESET}")
+print(f"{HEADER}▎{RESET}{DIM}          seen  = calls of that kind served for that model, ever{RESET}")
 server.serve_forever()
