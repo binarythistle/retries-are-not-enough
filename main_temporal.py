@@ -186,11 +186,31 @@ async def main():
 
     state = await handle.query(TicketWorkflow.get_state)
 
-    provider = state["provider"]
-    print(paint(GREEN, f"--- ANALYSIS ({ticket_id}) via {MODELS[provider]} ---"))
+    # Each block is labelled with the provider that actually produced it, not with
+    # whichever one the Workflow is on now. After a fallback those differ, and
+    # using state["provider"] for both claimed a gpt-4o-mini analysis had been
+    # written by claude-opus-5.
+    #
+    # main.py cannot have this bug: it prints each block the moment it has it, so
+    # the current provider is always the right label. This process prints both at
+    # the end, which is why the Workflow has to record who did what.
+    analysis_model = MODELS[state["analysis_provider"]]
+    response_model = MODELS[state["response_provider"]]
+
+    print(paint(GREEN, f"--- ANALYSIS ({ticket_id}) via {analysis_model} ---"))
     print(f"{state['analysis']}\n")
-    print(paint(GREEN, f"--- RESPONSE ({ticket_id}) via {MODELS[provider]} ---"))
+    print(paint(GREEN, f"--- RESPONSE ({ticket_id}) via {response_model} ---"))
     print(f"{response}\n")
+
+    if analysis_model != response_model:
+        print(
+            paint(
+                DIM,
+                f"Two providers, one ticket: analysed on {analysis_model}, "
+                f"replied on {response_model}.",
+            )
+            + "\n"
+        )
 
     show_state("at exit", state)
 

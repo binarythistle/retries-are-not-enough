@@ -431,15 +431,114 @@ genuinely interrupted runs again.
 Open the workflow in the Web UI afterwards and the event history shows it: one
 `ActivityTaskCompleted` for the analysis, two attempts at the response.
 
-### Two things that will catch you out
+### Workshop: falling back, durably
+
+The counterpart of scenario 8, and the answer to it. Same scenario, same crash, in
+the same second — `ANALYSIS_STATUS=200`, `RESPONSE_STATUS=429`,
+`STICKY_STATUS=429`. Restart the mock server first to clear any latch, and
+remember `.env` changes need the **worker** restarted too.
+
+**1. Start a run.**
+
+```bash
+uv run main_temporal.py 1041
+```
+
+The App tab will look like it has stalled after the state block. It hasn't — the
+starter is waiting on `handle.result()` and has no line of sight into progress.
+The action is in the **Worker** tab.
+
+**2. Watch the Worker tab.** The analysis succeeds on `gpt-4o-mini`, the response
+call gets a 429 carrying `insufficient_quota`, and the activity raises a
+non-retryable error rather than spending the retry budget on a wall. You get a
+traceback ending in `ApplicationError: QuotaExhausted`, then:
+
+```
+▌──────────────────────────────────────────────────────────────
+▌ ⚠️  DECISION: tokens maxed out on gpt-4o-mini. Retrying will not help.
+▌ 🔀 Falling back to claude-opus-5 in 10s.
+▌ 💾 provider=anthropic is recorded in the Workflow now, not in this process.
+▌──────────────────────────────────────────────────────────────
+```
+
+**3. Ctrl+C the worker while that banner is on screen.** You have ten seconds.
+Don't do it on the 429 in the mock log — the mock prints its line *before* it
+sends the response, so at that moment the attempt is still in flight, and killing
+there loses the attempt and costs an extra call.
+
+**4. Look at what survives, with nothing of yours running.**
+
+```bash
+temporal workflow show --workflow-id ticket-1041
+```
+
+`ActivityTaskFailed` carrying `QuotaExhausted`, and a `TimerStarted` of 10s
+immediately after it. The verdict and its consequence are on the server, and the
+process that reached them is gone.
+
+> A **Query** will not work here. `temporal workflow query` executes your workflow
+> code, so it needs a worker to replay the history — with none running it just
+> blocks. The event history is the read path that needs no worker.
+
+**5. Restart the worker**: `uv run worker.py`
+
+The failover happens and the ticket completes. The starter, which never died,
+prints the reply:
+
+```
+--- ANALYSIS (1041) via gpt-4o-mini ---
+--- RESPONSE (1041) via claude-opus-5 ---
+Two providers, one ticket: analysed on gpt-4o-mini, replied on claude-opus-5.
+
+--- WORKFLOW STATE (at exit) ---
+provider=anthropic  analysis=✔ COMPLETED  response=✔ COMPLETED
+```
+
+The whole mock log, for the entire ticket, crash included:
+
+```
+[1] analysis ticket=1041 model=gpt-4o-mini   retry=0 seen=1 -> 200
+[2] response ticket=1041 model=gpt-4o-mini   retry=0 seen=1 -> 429 (latched)
+[3] response ticket=1041 model=claude-opus-5 retry=0 seen=1 -> 200
+```
+
+**Three calls. Scenario 8 needed nine** — four before the crash, five after, of
+which only one was work that hadn't already been done. Nothing here is repeated,
+because nothing here was forgotten:
+
+- **The analysis is not redone.** It completed before the crash, so its result is
+  in the history, not in a dead process's memory.
+- **The decision is not re-derived.** `provider=anthropic` was recorded *before*
+  anything acted on it, which is exactly the window the crash landed in.
+- **The pause itself survived.** `main.py` waits in `time.sleep()`, which dies
+  with the process. This waits on a server-held timer that keeps ticking while no
+  worker is alive at all.
+
+And notice what did *not* have to change to get this: not the retry logic, not the
+fallback, not the error handling. `main.py` already had all of that right. The only
+difference is where the decision lives.
+
+The Web UI is worth opening afterwards. `ActivityTaskFailed` with `QuotaExhausted`,
+a timer, then a second `respond` activity against a different model — the whole
+argument in one event history.
+
+### Four things that will catch you out
 
 - **Changing `.env` means restarting the mock *and* the worker.** `activities.py`
   reads `.env` at import exactly as `mock_llm.py` does, so a worker left running
   from an earlier scenario holds stale config. `restart-mock` only covers the mock.
-- **`MAX_RETRIES` does nothing here.** The retry budget lives in `workflow.py` as
-  a `RetryPolicy`, deliberately: workflow code is replayed, and reading the
-  environment during a replay could give a different answer than the original
-  run. Change the policy in the file.
+- **`MAX_RETRIES` and `FALLBACK_PAUSE_SECONDS` do nothing here.** Both live in
+  `workflow.py` as literals — `RETRY` and `FALLBACK_PAUSE` — deliberately:
+  workflow code is replayed, and reading the environment during a replay could
+  give a different answer than the original run. Change them in the file, and
+  restart the worker.
+- **A Query needs a worker.** `temporal workflow query` executes your workflow
+  code, so the server can't answer one alone. Killing the worker and querying
+  looks like the perfect proof of durability and simply blocks. Use
+  `temporal workflow show` when nothing is running.
+- **The starter prints nothing until the run finishes.** It is not stuck; it holds
+  no state and has no line of sight into progress. Watch the Worker tab, or query
+  the workflow from a third terminal while a worker is up.
 
 ## Layout
 

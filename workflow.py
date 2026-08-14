@@ -99,6 +99,15 @@ class TicketWorkflow:
         self.analysis = None
         self.response = None
 
+        # Which provider actually produced each artifact, as opposed to which one
+        # the pipeline is using *now*. They differ the moment a fallback happens,
+        # and main.py has no equivalent — it prints each block as it is produced,
+        # so it never needs to remember. This starter prints both at the end, from
+        # state, and without these two it labelled a gpt-4o-mini analysis as
+        # claude-opus-5. Found by Les playing challenge 07.
+        self.analysis_provider = None
+        self.response_provider = None
+
     @workflow.run
     async def run(self, ticket_id: str) -> str:
         ticket = await workflow.execute_activity(
@@ -114,6 +123,7 @@ class TicketWorkflow:
             start_to_close_timeout=ATTEMPT_TIMEOUT,
             retry_policy=RETRY,
         )
+        self.analysis_provider = self.provider
 
         try:
             self.response = await self.draft(ticket)
@@ -171,16 +181,20 @@ class TicketWorkflow:
 
     async def draft(self, ticket: str) -> str:
         """The reply, on whichever provider self.provider currently names."""
-        return await workflow.execute_activity(
+        provider = self.provider
+        reply = await workflow.execute_activity(
             respond,
             ResponseInput(
                 ticket=ticket,
                 analysis=self.analysis,
-                provider=self.provider,
+                provider=provider,
             ),
             start_to_close_timeout=ATTEMPT_TIMEOUT,
             retry_policy=RETRY,
         )
+        # Recorded after the await, so a call that failed never claims credit.
+        self.response_provider = provider
+        return reply
 
     @workflow.query
     def get_state(self) -> dict:
@@ -191,9 +205,18 @@ class TicketWorkflow:
         by something that is not this process:
 
             temporal workflow query --workflow-id ticket-1041 --type get_state
+
+        Needs a worker running, though — a Query executes this code, so the server
+        cannot answer one on its own. Killing the worker and querying does not
+        work, however good a proof of durability it would be.
         """
         return {
             "provider": self.provider,
             "analysis": self.analysis,
             "response": self.response,
+            # Not in main.py's state dict, because main.py cannot need them: it
+            # prints each block as it is produced. After a fallback these two say
+            # who produced what, which is how the starter labels the output.
+            "analysis_provider": self.analysis_provider,
+            "response_provider": self.response_provider,
         }
