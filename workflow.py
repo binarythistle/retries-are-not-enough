@@ -35,13 +35,17 @@ with workflow.unsafe.imports_passed_through():
 # the environment during a replay could produce a different answer than it did
 # on the original run, which is a non-determinism bug.
 #
-# maximum_attempts is total attempts, not retries after the first. 3 here is the
-# same budget as main.py's default MAX_RETRIES=2.
+# maximum_attempts is total attempts, not retries after the first. 8 is more than
+# main.py's default budget of 3 (one try plus MAX_RETRIES=2), deliberately: with
+# the interval capped at 10s, 8 attempts span about 45 seconds. That is long
+# enough to kill the worker part-way through and watch the count carry on from
+# where it was instead of restarting at 1. .env does the same thing on the
+# main.py side, raising MAX_RETRIES to 10 for that scenario.
 RETRY = RetryPolicy(
     initial_interval=timedelta(seconds=1),
     backoff_coefficient=2.0,
     maximum_interval=timedelta(seconds=10),
-    maximum_attempts=3,
+    maximum_attempts=8,
 )
 
 # How long a single attempt is allowed to take before Temporal gives up on it

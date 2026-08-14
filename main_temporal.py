@@ -14,10 +14,11 @@ import asyncio
 import os
 import sys
 
-from temporalio.client import Client
+from temporalio.client import Client, WorkflowFailureError
+from temporalio.exceptions import ActivityError, RetryState
 
 from activities import MODELS
-from workflow import TicketWorkflow
+from workflow import RETRY, TicketWorkflow
 
 TASK_QUEUE = "tickets"
 ADDRESS = os.environ.get("TEMPORAL_ADDRESS", "127.0.0.1:7233")
@@ -60,6 +61,83 @@ def show_state(when, state):
     )
 
 
+# Activity names, in main.py's vocabulary. mock.log and main.py both talk about
+# "analysis" and "response", so a failure block that said "understand" or
+# "respond" would be the one place the two versions disagreed on the words.
+STEPS = {
+    "load_ticket": "the ticket read",
+    "understand": "analysis",
+    "respond": "response",
+}
+
+
+def report(error, state, workflow_id):
+    """The counterpart of report() in main.py, against a different error shape.
+
+    main.py catches an openai.APIError directly — it made the call itself. This
+    process did not, so a failed Workflow arrives as a chain:
+
+        WorkflowFailureError   the Workflow failed
+          ActivityError        which Activity, and why it stopped retrying
+            ApplicationError   the exception the Activity actually raised
+
+    Without this, the attendee gets that chain as a raw traceback where main.py
+    prints four tidy lines.
+    """
+    if os.environ.get("TRACEBACK"):
+        raise error
+
+    activity = error.cause if isinstance(error.cause, ActivityError) else None
+    application = getattr(activity, "cause", None) or error.cause
+
+    step = STEPS.get(getattr(activity, "activity_type", None), "the pipeline")
+    # ApplicationError.type is the name of the exception the Activity raised —
+    # "InternalServerError" for a 504 — which survived the trip through the
+    # server as a string. The status code and any error code are in the message.
+    kind = getattr(application, "type", None) or type(application).__name__
+    # .message, not str(): str() of an ApplicationError prepends its own type,
+    # which is already the first half of the line printed below.
+    detail = getattr(application, "message", None) or application
+
+    print(paint(RED, f"--- FAILED on {step} via {MODELS[state['provider']]} ---"))
+    print(paint(RED, f"{kind}: {detail}") + "\n")
+
+    # main.py has no equivalent of this block, and cannot have one: its retry
+    # budget lived inside a client object that no longer exists, so nothing is
+    # left to ask how far through the budget it got.
+    print(paint(DIM, "--- WHY IT STOPPED ---"))
+    retry_state = getattr(activity, "retry_state", None)
+    if retry_state == RetryState.MAXIMUM_ATTEMPTS_REACHED:
+        print(
+            paint(
+                DIM,
+                f"{RETRY.maximum_attempts} attempts, counted by the server rather "
+                "than by this process,",
+            )
+        )
+        print(paint(DIM, "then the policy in workflow.py was exhausted.") + "\n")
+    else:
+        print(paint(DIM, f"retry state: {retry_state}") + "\n")
+
+    show_state("at exit", state)
+
+    # main.py's version of this line is a dead end: it prints the state and the
+    # process exits, taking it with it. Here the run failed and the state did not.
+    if state["analysis"]:
+        print(paint(DIM, "The run failed. The analysis it had already paid for did not:"))
+    else:
+        print(paint(DIM, "The run failed. Its state is still readable:"))
+    print(
+        paint(
+            DIM,
+            f"  temporal workflow query --workflow-id {workflow_id} --type get_state",
+        )
+        + "\n"
+    )
+
+    raise SystemExit(1)
+
+
 async def main():
     ticket_id = sys.argv[1]
     client = await Client.connect(ADDRESS)
@@ -99,7 +177,13 @@ async def main():
     # seconds into a run, from another terminal:
     #   temporal workflow query --workflow-id ticket-1041 --type get_state
     # returns the finished analysis with response still null.
-    response = await handle.result()
+    try:
+        response = await handle.result()
+    except WorkflowFailureError as error:
+        # The Query still answers after a failed run, which is the whole point of
+        # printing state here rather than giving up with a traceback.
+        report(error, await handle.query(TicketWorkflow.get_state), workflow_id)
+
     state = await handle.query(TicketWorkflow.get_state)
 
     provider = state["provider"]
