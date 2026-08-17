@@ -3,6 +3,7 @@
 __pycache__/
 *.pyc
 instruqt-notes.md
+instruqt-copy.md
 mock.log
 worker.log
 temporal.db*

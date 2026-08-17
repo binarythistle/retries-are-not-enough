@@ -2,12 +2,12 @@
 
 Same two steps in the same order. The differences are the whole workshop:
 
-  main.py                         workflow.py
-  -------                         -----------
-  state = {...} in process memory self.* recorded in the Workflow's history
-  client retries, invisibly       RetryPolicy, declared and durable
-  crash = start again from zero   crash = resume from the last completed step
-  state visible only via print()  state readable from outside, via a Query
+  main.py                               workflow.py
+  -------                               -----------
+  state = {...} in process memory       self.* recorded in the Workflow's history
+  client retries, invisibly             RetryPolicy, declared and durable
+  crash = start again from zero         crash = resume from the last completed step
+  state visible only via print()        state readable from outside, via a Query
 """
 
 from datetime import timedelta
@@ -104,7 +104,7 @@ class TicketWorkflow:
         # and main.py has no equivalent — it prints each block as it is produced,
         # so it never needs to remember. This starter prints both at the end, from
         # state, and without these two it labelled a gpt-4o-mini analysis as
-        # claude-opus-5. Found by Les playing challenge 07.
+        # claude-opus-5. Found by Les playing challenge 08.
         self.analysis_provider = None
         self.response_provider = None
 

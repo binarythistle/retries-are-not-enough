@@ -84,7 +84,7 @@ STATUS = {
 
 # Keyed by (kind, model) rather than kind alone, so a fallback provider's calls
 # get their own count and cannot advance the primary model's position in its
-# sequence. With one model in play — every challenge before 07 — the numbers come
+# sequence. With one model in play — every challenge before 08 — the numbers come
 # out identical to the fixed two-key version this replaces.
 attempts = {}
 
@@ -205,7 +205,7 @@ class Handler(BaseHTTPRequestHandler):
         messages = {m["role"]: m["content"] for m in body["messages"]}
         ticket_id, kind = choose(messages.get("system", ""), messages.get("user", ""))
 
-        # Which model the app asked for. Before challenge 07 this was always the
+        # Which model the app asked for. Before challenge 08 this was always the
         # primary one and the field was ignored; now it decides which recordings
         # answer, whether the sequences apply, and which latch is checked.
         model = body.get("model") or PRIMARY_MODEL
@@ -230,7 +230,7 @@ class Handler(BaseHTTPRequestHandler):
         # The leading bar gives the tiled pane a consistent spine, so the mock's
         # output is distinguishable from the app's at a glance.
         #
-        # model= is new for challenge 07 and sits between two fields the check
+        # model= is new for challenge 08 and sits between two fields the check
         # scripts read. It is safe there because every one of them matches either
         # the "[n] kind " prefix or the " -> status" suffix, never a field index.
         print(

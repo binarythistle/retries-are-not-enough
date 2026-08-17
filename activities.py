@@ -28,7 +28,7 @@ QUOTA_EXHAUSTED = "QuotaExhausted"
 
 # Same two providers as main.py. Which one is used is decided by the Workflow
 # and passed in, because that decision is state — and losing it is what
-# challenge 03 was about.
+# challenge 04 was about.
 MODELS = {
     "openai": os.environ.get("MODEL", "gpt-4o-mini"),
     "anthropic": os.environ.get("ANTHROPIC_MODEL", "claude-opus-5"),
@@ -93,7 +93,7 @@ async def ask(provider, system, user):
     except openai.APIStatusError as error:
         if (getattr(error, "body", None) or {}).get("code") == "insufficient_quota":
             # non_retryable stops the RetryPolicy dead. Retrying this is exactly
-            # the waste challenges 03 and 07 are about, so the budget is not spent
+            # the waste challenges 04 and 08 are about, so the budget is not spent
             # on it — the failure goes straight back to the Workflow to act on.
             #
             # provider rides along in details because "quota exhausted" is only
@@ -105,7 +105,7 @@ async def ask(provider, system, user):
                 non_retryable=True,
             ) from error
         # Everything else is unchanged, and deliberately so: a 500 or a 504 is
-        # still a shape the RetryPolicy can handle, and challenges 06 and 08 rely
+        # still a shape the RetryPolicy can handle, and challenges 06 and 07 rely
         # on it doing exactly that.
         raise
 
