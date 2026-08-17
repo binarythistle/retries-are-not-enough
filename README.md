@@ -75,15 +75,16 @@ it only sees the requests the budget produces.
 `FALLBACK_PAUSE_SECONDS` (default `5`) is how long the app waits before failing
 over to a second provider. Backing off before failover is ordinary caution — you
 don't want to hammer a new provider the instant the first one hiccups — and it is
-also the window scenario 8 asks you to interrupt. Also an **app** setting.
+also the window scenario 4 asks you to interrupt. Also an **app** setting.
 
 ## 3. Failure scenarios
 
-`.env` carries nine numbered scenarios; uncomment one and **restart the mock
+`.env` carries eight numbered scenarios, one per workshop challenge —
+scenario N is the config for challenge N. Uncomment one and **restart the mock
 server**. Forgetting the restart is the most common mistake — the banner always
 prints the active config, so check it there.
 
-## Workshop: scenario 8 — the decision that didn't survive
+## Workshop: scenario 4 — the decision that didn't survive
 
 The app hits a wall it can't retry its way past, works out the right move, and
 then dies before it can act on it.
@@ -98,17 +99,18 @@ and the call that acts on it, and everything it just paid to learn goes with it 
 so the next run starts by calling the provider it had already ruled out, and
 redoing work it had already completed.
 
-**1. Enable scenario 8.** In `.env`, uncomment scenario 8's lines and comment out
+**1. Enable scenario 4.** In `.env`, uncomment scenario 4's lines and comment out
 any other scenario:
 
 ```
 ANALYSIS_STATUS=200
 RESPONSE_STATUS=429
 STICKY_STATUS=429
+FALLBACK_PAUSE_SECONDS=5
 ```
 
-`DELAY_SECONDS=1` and `FALLBACK_PAUSE_SECONDS=5` are comfortable at a desk. On a
-projector, give yourself 10.
+`FALLBACK_PAUSE_SECONDS=5` is comfortable at a desk. On a projector, give
+yourself 10 — it is the window you have to press Ctrl+C in.
 
 **2. Restart the mock server.** Confirm the banner shows:
 
@@ -245,22 +247,24 @@ same second — see "The Temporal version" below.
 **Reset.** Restart the mock server to clear the latch. Until you do, every
 `gpt-4o-mini` request returns 429 and other scenarios will look broken.
 
-## Workshop: scenario 9 — durable retries
+## Workshop: scenario 3 — losing your place
 
 Shows the app losing its place in a retry sequence. This one needs a Ctrl+C, and
-unlike scenario 8 the outcome never changes: a 504 is retried but never recovers,
+unlike scenario 4 the outcome never changes: a 504 is retried but never recovers,
 so both runs fail. The only difference is whether the retry budget was honoured.
 
-**1. Enable scenario 9.** In `.env`, uncomment scenario 9 and comment out any
-other scenario — including scenario 8's `STICKY_STATUS`:
+**1. Enable scenario 3.** In `.env`, uncomment scenario 3 and comment out any
+other scenario — including scenario 4's `STICKY_STATUS`:
 
 ```
 ANALYSIS_STATUS=200
 RESPONSE_STATUS=504
 MAX_RETRIES=10
+DELAY_SECONDS=0
 ```
 
-`DELAY_SECONDS=0` is fine here; the client's own backoff paces the retries.
+`DELAY_SECONDS=0` is part of the scenario; the client's own backoff paces the
+retries, so the mock does not need to add any.
 
 **2. Restart the mock server.** The banner ends with the log key:
 
@@ -338,7 +342,7 @@ Requires the Temporal CLI: `brew install temporal`.
 
 ### What to look for
 
-Run scenario 1 (`ANALYSIS_STATUS=200`, `RESPONSE_STATUS=200`) and the output is
+Run scenario 5 (`ANALYSIS_STATUS=200`, `RESPONSE_STATUS=200`) and the output is
 the same analysis and reply as `uv run main.py 1041`, from the same recordings.
 Two things differ.
 
@@ -399,8 +403,8 @@ that has not finished, and cannot be asked for it.
 
 ### Workshop: killing the worker mid-run
 
-The counterpart to scenario 9, and the point of the whole exercise. With
-`DELAY_SECONDS=2` and scenario 1 active:
+The counterpart to scenario 3, and the point of the whole exercise. With
+`DELAY_SECONDS=2` and scenario 5 active:
 
 **1. Start a run** in the starter terminal:
 
@@ -422,7 +426,7 @@ reply. The mock log:
 [11] response ticket=1043 retry=0 seen=6 -> 200     retried after the restart
 ```
 
-One analysis call, two response calls. Compare against scenario 9, where a
+One analysis call, two response calls. Compare against scenario 3, where a
 Ctrl+C sends the app back to the start: the analysis is re-called and re-billed,
 and the retry counter resets to 0. Here the completed step is not repeated,
 because its result is recorded rather than remembered. Only the step that was
@@ -433,10 +437,12 @@ Open the workflow in the Web UI afterwards and the event history shows it: one
 
 ### Workshop: falling back, durably
 
-The counterpart of scenario 8, and the answer to it. Same scenario, same crash, in
-the same second — `ANALYSIS_STATUS=200`, `RESPONSE_STATUS=429`,
-`STICKY_STATUS=429`. Restart the mock server first to clear any latch, and
-remember `.env` changes need the **worker** restarted too.
+The counterpart of scenario 4, and the answer to it. **Enable scenario 8** —
+same wall, same crash, in the same second: `ANALYSIS_STATUS=200`,
+`RESPONSE_STATUS=429`, `STICKY_STATUS=429`. The one thing scenario 4 sets that
+this does not is `FALLBACK_PAUSE_SECONDS`; here the pause is a literal in
+`workflow.py`. Restart the mock server first to clear any latch, and remember
+`.env` changes need the **worker** restarted too.
 
 **1. Start a run.**
 
@@ -502,7 +508,7 @@ The whole mock log, for the entire ticket, crash included:
 [3] response ticket=1041 model=claude-opus-5 retry=0 seen=1 -> 200
 ```
 
-**Three calls. Scenario 8 needed nine** — four before the crash, five after, of
+**Three calls. Scenario 4 needed nine** — four before the crash, five after, of
 which only one was work that hadn't already been done. Nothing here is repeated,
 because nothing here was forgotten:
 
