@@ -124,7 +124,12 @@ async def load_ticket(ticket_id: str) -> str:
 
 
 @activity.defn
-async def understand(args: AnalysisInput) -> str:
+async def analysis(args: AnalysisInput) -> str:
+    # A noun where the others are verbs, deliberately. The Activity Type name
+    # Temporal records is this function's name, so it is also the word the Web UI
+    # timeline and the event history show. main.py and mock.log both call this
+    # call "analysis", and having the UI disagree with them was confusing.
+    #
     # "triage analyst" is load-bearing. mock_llm.py decides whether an incoming
     # request is the analysis call or the response call by looking for that
     # exact phrase in the system prompt. Reword this and the mock serves the

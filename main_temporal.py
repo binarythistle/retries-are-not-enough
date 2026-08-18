@@ -61,12 +61,13 @@ def show_state(when, state):
     )
 
 
-# Activity names, in main.py's vocabulary. mock.log and main.py both talk about
-# "analysis" and "response", so a failure block that said "understand" or
-# "respond" would be the one place the two versions disagreed on the words.
+# Activity Type names -> the words the failure block uses. The keys are the names
+# the server recorded, which is what report() reads off the ActivityError, not the
+# Python function names. "analysis" maps to itself and still needs its entry:
+# without one, STEPS.get() below falls through to "the pipeline".
 STEPS = {
     "load_ticket": "the ticket read",
-    "understand": "analysis",
+    "analysis": "analysis",
     "respond": "response",
 }
 

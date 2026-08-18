@@ -28,7 +28,7 @@ sys.stdout.reconfigure(line_buffering=True)
 from temporalio import workflow
 
 with workflow.unsafe.imports_passed_through():
-    from activities import load_ticket, respond, understand
+    from activities import analysis, load_ticket, respond
     from workflow import TicketWorkflow
 
 TASK_QUEUE = "tickets"
@@ -61,7 +61,7 @@ async def main():
         client,
         task_queue=TASK_QUEUE,
         workflows=[TicketWorkflow],
-        activities=[load_ticket, understand, respond],
+        activities=[load_ticket, analysis, respond],
     )
 
     print(f"worker ready: {ADDRESS}, task queue '{TASK_QUEUE}'")

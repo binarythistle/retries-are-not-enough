@@ -26,9 +26,9 @@ with workflow.unsafe.imports_passed_through():
         QUOTA_EXHAUSTED,
         AnalysisInput,
         ResponseInput,
+        analysis,
         load_ticket,
         respond,
-        understand,
     )
 
 # Retry configuration is code here, not an environment variable.
@@ -118,7 +118,7 @@ class TicketWorkflow:
         )
 
         self.analysis = await workflow.execute_activity(
-            understand,
+            analysis,
             AnalysisInput(ticket=ticket, provider=self.provider),
             start_to_close_timeout=ATTEMPT_TIMEOUT,
             retry_policy=RETRY,
