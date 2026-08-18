@@ -72,10 +72,12 @@ OPENAI_BASE_URL=https://api.openai.com/v1 uv run main.py 1041
 attempt plus that many retries. It is an **app** setting: the mock never reads it,
 it only sees the requests the budget produces.
 
-`FALLBACK_PAUSE_SECONDS` (default `5`) is how long the app waits before failing
+`FALLBACK_PAUSE_SECONDS` (default `10`) is how long the app waits before failing
 over to a second provider. Backing off before failover is ordinary caution — you
 don't want to hammer a new provider the instant the first one hiccups — and it is
-also the window scenario 4 asks you to interrupt. Also an **app** setting.
+also the window scenario 4 asks you to interrupt. Also an **app** setting. The
+default matches `FALLBACK_PAUSE` in `workflow.py`, so scenarios 4 and 8 give you
+the same length of window to kill a process in.
 
 ## 3. Failure scenarios
 
@@ -106,11 +108,12 @@ any other scenario:
 ANALYSIS_STATUS=200
 RESPONSE_STATUS=429
 STICKY_STATUS=429
-FALLBACK_PAUSE_SECONDS=5
+FALLBACK_PAUSE_SECONDS=10
 ```
 
-`FALLBACK_PAUSE_SECONDS=5` is comfortable at a desk. On a projector, give
-yourself 10 — it is the window you have to press Ctrl+C in.
+`FALLBACK_PAUSE_SECONDS=10` is the window you have to kill the app in, and it is
+the same 10s `workflow.py` gives you in scenario 8. Drop it to 5 at a desk if the
+wait annoys you; raise it on a projector in a room of thirty.
 
 **2. Restart the mock server.** Confirm the banner shows:
 
@@ -141,10 +144,12 @@ uv run main.py 1041
 --- FAILED on response via gpt-4o-mini ---
 RateLimitError / HTTP 429 / insufficient_quota: ...
 
---- DECISION ---
-Tokens maxed out on gpt-4o-mini. Retrying will not help.
-Fall back to Anthropic models.
-Waiting 5s before failing over to claude-opus-5...
+▌──────────────────────────────────────────────────────────────
+▌ ⚠️  DECISION: tokens maxed out on gpt-4o-mini. Retrying will not help.
+▌ 🔀 Falling back to claude-opus-5 in 10s.
+▌ 💾 provider=anthropic is in this process's memory, nowhere else.
+▌ 💥 Kill this process now and the decision dies with it.
+▌──────────────────────────────────────────────────────────────
 
 --- RESPONSE (1041) via claude-opus-5 ---
 ...
@@ -168,9 +173,9 @@ Same command, but this time interrupt it:
 uv run main.py 1041
 ```
 
-When you see `Waiting 5s before failing over...`, press **Ctrl+C**. You'll get a
-`KeyboardInterrupt` traceback, which is what a crash looks like — an evicted pod
-or an OOM kill gets you to the same place with less warning.
+When the amber **DECISION** banner appears, press **Ctrl+C** — you have 10s.
+You'll get a `KeyboardInterrupt` traceback, which is what a crash looks like — an
+evicted pod or an OOM kill gets you to the same place with less warning.
 
 ```
 [1] analysis ticket=1041 model=gpt-4o-mini retry=0 seen=1 -> 200

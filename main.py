@@ -25,7 +25,11 @@ MAX_RETRIES = int(os.environ.get("MAX_RETRIES", "2"))
 # instant the first one hiccups — and it is the window the workshop asks you to
 # interrupt, which is why it is a knob rather than a literal: the right value on a
 # projector is not the right value at a desk.
-FALLBACK_PAUSE_SECONDS = float(os.environ.get("FALLBACK_PAUSE_SECONDS", "5"))
+#
+# 10s matches FALLBACK_PAUSE in workflow.py, which cannot be a knob at all. The
+# two flavours ask you to kill a process in the same window, so the window is the
+# same length in both.
+FALLBACK_PAUSE_SECONDS = float(os.environ.get("FALLBACK_PAUSE_SECONDS", "10"))
 
 client = OpenAI(max_retries=MAX_RETRIES)
 
@@ -43,6 +47,21 @@ RESET = "\033[0m" if COLOUR else ""
 def paint(colour, text):
     """Green = the model spoke. Red = it failed. Dim = the app talking about itself."""
     return f"{colour}{text}{RESET}"
+
+
+# The DECISION banner, deliberately the same shape as the one in workflow.py.
+#
+# It used to be four dim lines, which read as more of the app's own quiet
+# commentary — and this is the one moment the attendee has to *act* on, in a
+# window a few seconds wide. The Temporal side already shouted; this side
+# whispered. Same block, same amber, so the cue to kill the process looks
+# identical in both flavours and only the wording differs.
+#
+# Colour the whole line, never the middle of one: any script grepping for DECISION
+# must be unanchored or strip escapes first.
+BOLD_AMBER = "\033[1;33m" if COLOUR else ""
+SPINE = f"{BOLD_AMBER}▌{RESET}"
+RULE = f"{BOLD_AMBER}▌{'─' * 62}{RESET}"
 
 
 def model():
@@ -136,21 +155,22 @@ def fall_back():
     """
     state["provider"] = "anthropic"
 
-    print(paint(DIM, "--- DECISION ---"))
+    # One print, and flushed, because the attendee times a crash off this block and
+    # it is the one output in the file whose timing is load-bearing. A redirect to a
+    # log file block-buffers otherwise, and the pause looks like a hang.
+    #
+    # The last two lines are where this banner and workflow.py's part company, and
+    # the difference is the whole workshop. There, the decision is already recorded
+    # on the server before the pause starts. Here it is a dict in memory.
     print(
-        paint(DIM, f"Tokens maxed out on {MODELS['openai']}. Retrying will not help.")
-    )
-    print(paint(DIM, "Fall back to Anthropic models."))
-    # flush, because the attendee times a Ctrl+C off this line and it is the one
-    # print in the file whose timing is load-bearing. A redirect to a log file
-    # block-buffers otherwise, and the pause looks like a hang.
-    print(
-        paint(
-            DIM,
-            f"Waiting {FALLBACK_PAUSE_SECONDS:g}s before failing over "
-            f"to {MODELS['anthropic']}...",
-        )
-        + "\n",
+        f"\n{RULE}"
+        f"\n{SPINE} ⚠️  DECISION: tokens maxed out on {MODELS['openai']}."
+        " Retrying will not help."
+        f"\n{SPINE} 🔀 Falling back to {MODELS['anthropic']} in "
+        f"{FALLBACK_PAUSE_SECONDS:g}s."
+        f"\n{SPINE} 💾 provider=anthropic is in this process's memory, nowhere else."
+        f"\n{SPINE} 💥 Kill this process now and the decision dies with it."
+        f"\n{RULE}\n",
         flush=True,
     )
 
