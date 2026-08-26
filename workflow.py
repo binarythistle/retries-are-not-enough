@@ -43,7 +43,8 @@ with workflow.unsafe.imports_passed_through():
 # the interval capped at 10s, 8 attempts span about 45 seconds. That is long
 # enough to kill the worker part-way through and watch the count carry on from
 # where it was instead of restarting at 1. .env does the same thing on the
-# main.py side, raising MAX_RETRIES to 10 for that scenario.
+# main.py side, raising MAX_RETRIES to 8 for that scenario — which is 9 requests
+# there, not 8, because MAX_RETRIES is retries after the first attempt.
 RETRY = RetryPolicy(
     initial_interval=timedelta(seconds=1),
     backoff_coefficient=2.0,

@@ -264,7 +264,7 @@ other scenario — including scenario 4's `STICKY_STATUS`:
 ```
 ANALYSIS_STATUS=200
 RESPONSE_STATUS=504
-MAX_RETRIES=10
+MAX_RETRIES=8
 DELAY_SECONDS=0
 ```
 
@@ -308,8 +308,8 @@ the Python child running, and it will quietly finish its retries.
 
 `retry` restarted at 0; `seen` carried on from 5 to 6. The upstream has now taken
 six runs at this call while the app believes it is on its first. Leave run 2
-alone and it will spend all 10 retries and fail — 11 response attempts,
-`retry=0..10`, taking about 45 seconds as the backoff widens to its 8-second cap.
+alone and it will spend all 8 retries and fail — 9 response attempts,
+`retry=0..8`, taking about 30 seconds as the backoff widens to its 8-second cap.
 That is the budget working correctly, because nothing interrupted it.
 
 **Why the count matters.** A retry budget is a contract: try this many times,
