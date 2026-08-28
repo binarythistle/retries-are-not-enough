@@ -31,20 +31,20 @@ with workflow.unsafe.imports_passed_through():
         respond,
     )
 
-# Retry configuration is code here, not an environment variable.
+# 
+# 
+# 
+#  
+# 
+# 
 #
-# main.py reads MAX_RETRIES from .env at import and hands it to the OpenAI
-# client. That cannot work in a Workflow: Workflow code is replayed, and reading
-# the environment during a replay could produce a different answer than it did
-# on the original run, which is a non-determinism bug.
-#
-# maximum_attempts is total attempts, not retries after the first. 8 is more than
-# main.py's default budget of 3 (one try plus MAX_RETRIES=2), deliberately: with
-# the interval capped at 10s, 8 attempts span about 45 seconds. That is long
-# enough to kill the worker part-way through and watch the count carry on from
-# where it was instead of restarting at 1. .env does the same thing on the
-# main.py side, raising MAX_RETRIES to 8 for that scenario — which is 9 requests
-# there, not 8, because MAX_RETRIES is retries after the first attempt.
+# 
+# Retry configuration must be deterministic for a Workflow execution.
+# Do not read mutable environment or external configuration during Workflow replay.
+# These values are literals here so replay always schedules the same retry policy.
+# Configuration can instead be passed into the Workflow as input
+# or fixed as part of the deployed code.
+# 
 RETRY = RetryPolicy(
     initial_interval=timedelta(seconds=1),
     backoff_coefficient=2.0,
