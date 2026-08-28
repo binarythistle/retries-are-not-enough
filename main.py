@@ -15,27 +15,16 @@ MODELS = {
 }
 
 # The only state this app has, and it lives in this process's memory. Every run
-# starts from exactly these values, however the last run ended.
+# starts from exactly these values, irrespective of how the last run ended.
 state = {"provider": "openai", "analysis": None, "response": None}
 
 MAX_RETRIES = int(os.environ.get("MAX_RETRIES", "2"))
-
-# How long to wait before failing over to a second provider. Backing off before a
-# failover is ordinary caution — you do not want to hammer a new provider the
-# instant the first one hiccups — and it is the window the workshop asks you to
-# interrupt, which is why it is a knob rather than a literal: the right value on a
-# projector is not the right value at a desk.
-#
-# 10s matches FALLBACK_PAUSE in workflow.py, which cannot be a knob at all. The
-# two flavours ask you to kill a process in the same window, so the window is the
-# same length in both.
+ 
+# Gives the workshop participant time to crash the process
 FALLBACK_PAUSE_SECONDS = float(os.environ.get("FALLBACK_PAUSE_SECONDS", "10"))
 
 client = OpenAI(max_retries=MAX_RETRIES)
 
-# Colour is display only. Off when stdout is not a terminal, so `> run.log`
-# stays free of escape codes, and off when NO_COLOR is set. When it is off the
-# codes are empty strings, so every paint() below is a no-op.
 COLOUR = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
 
 GREEN = "\033[32m" if COLOUR else ""
@@ -49,16 +38,8 @@ def paint(colour, text):
     return f"{colour}{text}{RESET}"
 
 
-# The DECISION banner, deliberately the same shape as the one in workflow.py.
-#
-# It used to be four dim lines, which read as more of the app's own quiet
-# commentary — and this is the one moment the attendee has to *act* on, in a
-# window a few seconds wide. The Temporal side already shouted; this side
-# whispered. Same block, same amber, so the cue to kill the process looks
-# identical in both flavours and only the wording differs.
-#
-# Colour the whole line, never the middle of one: any script grepping for DECISION
-# must be unanchored or strip escapes first.
+# The DECISION banner.
+# This is used to prompt the workshop participant to crash the process
 BOLD_AMBER = "\033[1;33m" if COLOUR else ""
 SPINE = f"{BOLD_AMBER}▌{RESET}"
 RULE = f"{BOLD_AMBER}▌{'─' * 62}{RESET}"
@@ -69,8 +50,6 @@ def model():
     return MODELS[state["provider"]]
 
 
-# Column widths, so the "at start" and "at exit" lines align under each other
-# and the audience can compare them vertically.
 PROVIDER_WIDTH = max(len(name) for name in MODELS)
 STATUS_WIDTH = len("* COMPLETED")
 
@@ -155,13 +134,6 @@ def fall_back():
     """
     state["provider"] = "anthropic"
 
-    # One print, and flushed, because the attendee times a crash off this block and
-    # it is the one output in the file whose timing is load-bearing. A redirect to a
-    # log file block-buffers otherwise, and the pause looks like a hang.
-    #
-    # The last two lines are where this banner and workflow.py's part company, and
-    # the difference is the whole workshop. There, the decision is already recorded
-    # on the server before the pause starts. Here it is a dict in memory.
     print(
         f"\n{RULE}"
         f"\n{SPINE} ⚠️  DECISION: tokens maxed out on {MODELS['openai']}."
@@ -193,13 +165,11 @@ def main():
 
     while True:
         try:
-            # Each step is skipped if state already has it, so a retry after a
-            # provider switch does not redo a call this process already made.
-            #
-            # Note the limit of that, because it is the whole workshop: it only
-            # holds *within* this process. state is a dict in memory, so a run
-            # that starts fresh sees both of these as MISSING however much was
-            # completed and paid for last time.
+            # We aim to only complete each step 1 time - no duplication even if we 
+            # fallback to another provider. However, as state is only held in
+            # memory, if the process crashes this state is not maintaind, and
+            # we may duplicate work that has already been completed. 
+            # In other words this code is not durable
             if state["analysis"] is None:
                 state["analysis"] = understand(ticket)
                 print(paint(GREEN, f"--- ANALYSIS ({ticket_id}) via {model()} ---"))
@@ -219,8 +189,7 @@ def main():
             call = "analysis" if state["analysis"] is None else "response"
             code = report(call, error)
 
-            # One fallback, and only from the provider we started on. Anthropic
-            # hitting the same wall leaves nowhere left to go.
+            # One fallback, and only from the provider we started on.
             if code == "insufficient_quota" and state["provider"] == "openai":
                 fall_back()
                 continue
