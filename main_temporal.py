@@ -23,8 +23,6 @@ from workflow import RETRY, TicketWorkflow
 TASK_QUEUE = "tickets"
 ADDRESS = os.environ.get("TEMPORAL_ADDRESS", "127.0.0.1:7233")
 
-# Same display-only colour rules as main.py, so the two runs look alike on
-# screen and the difference the attendee notices is the content, not the theme.
 COLOUR = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
 
 GREEN = "\033[32m" if COLOUR else ""
@@ -60,11 +58,7 @@ def show_state(when, state):
         + "\n"
     )
 
-
-# Activity Type names -> the words the failure block uses. The keys are the names
-# the server recorded, which is what report() reads off the ActivityError, not the
-# Python function names. "analysis" maps to itself and still needs its entry:
-# without one, STEPS.get() below falls through to "the pipeline".
+# Allows us to change the labeling of activites in the Temporl UI
 STEPS = {
     "load_ticket": "the ticket read",
     "analysis": "analysis",
